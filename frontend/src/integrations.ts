@@ -41,7 +41,7 @@ const messages:Record<string,string>={
  AI_RATE_LIMITED:'AI 服务请求较多，稍后会重试。规则识别仍可独立使用。',
  AI_SERVICE_FAILED:'AI 服务暂时不可用，请检查服务状态后重试。规则识别仍可独立使用。',
  AI_OUTPUT_INVALID:'服务返回的建议无法与原文核对，本次保留规则识别结果。',
- AI_OUTPUT_INCOMPLETE:'AI 输出被服务截断，请换用非深度思考模型，或缩短邮件后重试。已有事件保持不变。',
+ AI_OUTPUT_INCOMPLETE:'AI 服务仍未返回完整事件数据，已自动扩大输出预算恢复一次。请稍后重试；已有事件保持不变。',
  AI_COOLDOWN:'AI 连续失败后已暂时暂停，请检查服务配置，或稍后重试。规则识别仍可使用。',
  AI_INPUT_CHANGED:'邮件或设置已变化，本次 AI 已取消；请核对当前内容后重新识别。',
  AI_CONFIG_CHANGED:'AI 配置已改变，请保存当前设置后重新测试。',

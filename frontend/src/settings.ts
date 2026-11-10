@@ -1,5 +1,19 @@
 import {kindNames} from './domain';
 
+export function mailboxErrorMessage(code:string):string{
+ const messages:Record<string,string>={
+  MAIL_AUTH_FAILED:'邮箱认证失败，请确认已开启 IMAP，并更新授权码。',
+  MAIL_NETWORK_ERROR:'暂时无法连接邮箱，稍后将按下方时间自动重试；也可手动立即同步。',
+  MAIL_FETCH_FAILED:'邮件正文读取未完成，已保留同步进度，将按下方时间重试。连接测试只验证登录和打开收件箱。',
+  MAIL_STRUCTURE_INVALID:'邮件正文结构无法读取，已保留同步进度，将按下方时间重试。',
+  MAIL_SEARCH_FAILED:'邮箱暂未完成邮件查询，已保留同步进度，将按下方时间重试。',
+  MAIL_PROTOCOL_ERROR:'邮箱返回了不完整的响应，已保留同步进度，将按下方时间重试。',
+  MAIL_FOLDER_UNAVAILABLE:'无法只读打开收件箱，请确认 IMAP 服务已开启。',
+  MAIL_CLIENT_ID_FAILED:'邮箱未接受客户端身份，请确认已开启 IMAP，并使用邮箱授权码。',
+ };
+ return messages[code]??'上次同步未完成，已保留已有邮件；可稍后重试或查看诊断。';
+}
+
 export type ReminderDraft={offsets:Record<string,string>;quiet:{enabled:boolean;start:string;end:string};privacy:string};
 export function reminderDraft(settings:Record<string,any>):ReminderDraft{
  return {offsets:Object.fromEntries(Object.keys(kindNames).map(kind=>[kind,(settings.reminder_offsets_seconds?.[kind]??[]).map((n:number)=>n/60).join(', ')])),

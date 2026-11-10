@@ -114,12 +114,20 @@ class QQConnection:
             raise AppError("MAIL_SEARCH_FAILED", "查询邮件失败", 503)
         return sorted({int(x) for x in response[0].split() if min_uid <= int(x) <= upper_uid})[:50]
 
-    def _fetch(self, message_uid, fields):
+    def _fetch(self, message_uid, fields, *, allow_empty=False):
         kind, response = self.connection.uid("FETCH", str(message_uid), fields)
         if kind != "OK" or not response:
             raise AppError("MAIL_FETCH_FAILED", "读取邮件失败，游标未推进", 503)
         literals = [item for item in response if isinstance(item, tuple)]
         if not literals:
+            for item in response:
+                quoted = re.search(rb'BODY\[[^]]*\](?:<\d+>)?\s+"((?:[^"\\\r\n]|\\["\\])*)"(?=\s|\))', item, re.I) if isinstance(item, bytes) else None
+                if quoted:
+                    value = re.sub(rb'\\(["\\])', rb'\1', quoted[1])
+                    return [(item[:quoted.start(1)] + b'{' + str(len(value)).encode() + b'}', value)]
+            if allow_empty and any(isinstance(item, bytes) and re.search(
+                    rb'BODY\[[^]]*\](?:<\d+>)?\s+(?:NIL|"\")(?=\s|\))', item, re.I) for item in response):
+                return response
             raise AppError("MAIL_FETCH_FAILED", "邮件响应不完整，游标未推进", 503)
         for item in literals:
             if len(item) != 2 or not all(isinstance(part, bytes) for part in item):
@@ -137,9 +145,20 @@ class QQConnection:
         if not matched:
             raise AppError("MAIL_STRUCTURE_INVALID", "邮件正文结构无法读取", 503)
         try:
-            parts = _text_parts(_imap_tree(matched[1]))
+            tree = _imap_tree(matched[1])
+            parts = _text_parts(tree)
         except (ValueError, IndexError):
-            parts = []
+            raise AppError("MAIL_STRUCTURE_INVALID", "邮件正文结构无法读取，游标未推进", 503) from None
+        # A root text message has no MIME part 1 on QQ. BODY[1.MIME]
+        # legitimately returns NIL; its MIME fields are in the message header.
+        if parts and isinstance(tree[0], str):
+            body = self._fetch(message_uid, '(BODY.PEEK[TEXT]<0.393216>)',
+                               allow_empty=len(tree) > 6 and str(tree[6]) == '0')
+            body_bytes = next((x[1] for x in body if isinstance(x, tuple)), b'')
+            if not body_bytes and len(tree) > 6 and str(tree[6]).isdigit() and int(tree[6]) > 0:
+                raise AppError('MAIL_FETCH_FAILED', '邮件正文响应为空，游标未推进', 503)
+            return {"raw": headers.rstrip(b'\r\n') + b'\r\n\r\n' + body_bytes,
+                    "internal_date": self._internal_date(metadata)}
         parts.sort(key=lambda part: part[1] != "plain")
         text_parts = []
         for section, _ in parts[:4]:
@@ -158,14 +177,17 @@ class QQConnection:
             raw = chosen_headers + text_parts[0][0].rstrip(b"\r\n") + b"\r\n\r\n" + text_parts[0][1]
         else:
             raw = chosen_headers + b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
-        internal_date = None
+        return {"raw": raw, "internal_date": self._internal_date(metadata)}
+
+    @staticmethod
+    def _internal_date(metadata):
         date_match = re.search(rb'INTERNALDATE "([^"]+)"', metadata)
         if date_match:
             try:
-                internal_date = iso(parsedate_to_datetime(date_match[1].decode()))
+                return iso(parsedate_to_datetime(date_match[1].decode()))
             except (ValueError, TypeError):
                 pass
-        return {"raw": raw, "internal_date": internal_date}
+        return None
 
 
 class QQAdapter(MailProviderAdapter):
@@ -332,9 +354,11 @@ class AccountService:
                         if account.state == "removed":
                             self.jobs.update(job_id, status="interrupted", error_code="ACCOUNT_REMOVED")
                             return
-                        if account.state != "paused":
+                        if account.state != "paused" and account.last_error_code not in (
+                                'MAIL_FETCH_FAILED', 'MAIL_STRUCTURE_INVALID', 'MAIL_SEARCH_FAILED'):
                             account.state, account.last_error_code, account.next_sync_at = "ready", None, None
-                    self.jobs.update(job_id, status="succeeded", result={"ok": True, "readonly": True})
+                    self.jobs.update(job_id, status="succeeded", result={"ok": True, "readonly": True,
+                        "scope": "authentication_and_folder"})
                     return
                 validity, upper_uid = str(info["uidvalidity"]), int(info["uidnext"]) - 1
                 if old_validity != validity:

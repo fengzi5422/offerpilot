@@ -8,7 +8,7 @@ AppId=OfferPilot.Lite.IsolatedQA
 AppId=OfferPilot.Lite
 #endif
 AppName=OfferPilot Lite
-AppVersion=1.0.0-rc.2
+AppVersion=1.0.0-rc.3
 DefaultDirName={localappdata}\Programs\OfferPilot
 DefaultGroupName=OfferPilot
 PrivilegesRequired=lowest

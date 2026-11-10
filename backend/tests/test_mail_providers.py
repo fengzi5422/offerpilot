@@ -39,7 +39,7 @@ class Protocol:
         if command == 'SEARCH':
             return 'OK', [b'1 1 99']
         if 'BODYSTRUCTURE' in args[1]:
-            return 'OK', [(b'1 (BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "8BIT" 5 1) '
+            return 'OK', [(b'1 (BODYSTRUCTURE (("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "8BIT" 5 1) "MIXED") '
                            b'INTERNALDATE "09-Nov-2026 10:00:00 +0800" BODY[HEADER] {30}',
                            b'From: hr@example.test\r\nSubject: Test\r\n\r\n'), b')']
         content = b'Content-Type: text/plain; charset=utf-8\r\n\r\n' if '.MIME' in args[1] else b'hello'

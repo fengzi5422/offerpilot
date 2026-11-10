@@ -1,4 +1,5 @@
 import {aiRuntimeMessage} from './integrations';
+import {mailboxErrorMessage} from './settings';
 export class ApiError extends Error { constructor(public code:string,message:string,public status:number){super(message);} }
 let csrf='';
 const pendingKeys=new Map<string,string>();
@@ -28,7 +29,7 @@ export async function waitJob(id:string,options:{onProgress?:(job:any)=>void;isC
   if(options.isCurrent&&!options.isCurrent())return null;
   options.onProgress?.(job);
   if(job.status==='succeeded'||job.state==='succeeded')return job;
-  if(['failed','interrupted'].includes(job.status??job.state))throw new Error(jobErrors[job.error_code]??(job.kind==='ai_parse'?aiRuntimeMessage(job.error_code):'操作未完成，请重试或在诊断中查看状态。'));
+  if(['failed','interrupted'].includes(job.status??job.state))throw new Error(job.error_code?.startsWith('MAIL_')?mailboxErrorMessage(job.error_code):jobErrors[job.error_code]??(job.kind==='ai_parse'?aiRuntimeMessage(job.error_code):'操作未完成，请重试或在诊断中查看状态。'));
   await new Promise(r=>setTimeout(r,1000));
  }
  throw new Error('操作仍在后台进行，请稍后查看状态');

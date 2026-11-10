@@ -1,7 +1,7 @@
 {
   "name": "offerpilot-ui",
   "private": true,
-  "version": "1.0.0-rc.2",
+  "version": "1.0.0-rc.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

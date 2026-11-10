@@ -38,7 +38,7 @@ async function reparse(mode='rules'){
  parseProgress.value=mode==='ai'?'正在提交 AI 识别，请稍候…':'正在重新识别…';
  try{
   const job=await request(`/emails/${id}/reparse`,'POST',{expected_version:version,mode});
-  const result=await waitJob(job.job_id,{timeoutMs:150000,isCurrent:current,onProgress:job=>{
+  const result=await waitJob(job.job_id,{timeoutMs:180000,isCurrent:current,onProgress:job=>{
    if(mode!=='ai')return;
    const retry=job.progress?.retry_at;
    parseProgress.value=job.status==='running'?'AI 正在读取并核对原文，通常需要几秒到半分钟…':

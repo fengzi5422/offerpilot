@@ -1,13 +1,16 @@
 """A bounded persistent suggestion queue; HTTP never holds a database/activity lock."""
 import hashlib
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from contextlib import contextmanager
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
 from app.ai import AIParser
 from app.domain import AppError, iso, millis
+from app.mail import parse_temporal
 from app.persistence import Candidate, Email, Job, Setting, check_version, get_record
 
 TRANSIENT = {'AI_RATE_LIMITED', 'AI_SERVICE_FAILED', 'SERVICE_TIMEOUT', 'SERVICE_NETWORK_ERROR'}
@@ -18,8 +21,20 @@ def enrich_open_candidate(old, suggestion):
     merged = {**old}
     previous, proposed = old['temporal'], suggestion['temporal']
     precise = previous.get('precision') == 'minute' and not previous.get('needs_confirmation')
+    if precise and previous.get('raw_text'):
+        anchor = previous.get('starts_at') or previous.get('due_at')
+        zone = previous.get('timezone') or 'Asia/Shanghai'
+        year = datetime.fromisoformat(anchor).astimezone(ZoneInfo(zone)).year
+        reparsed = parse_temporal(previous['raw_text'], old['kind'], zone, default_event_year=year)
+        field = 'starts_at' if previous.get('starts_at') else 'due_at'
+        # Repair only an open parser candidate when its own saved evidence proves
+        # the correction. Accepted/ignored tasks never reach this merge function.
+        if not reparsed['needs_confirmation'] and reparsed.get(field) == proposed.get(field) != previous.get(field):
+            precise = False
     if not precise and (proposed.get('starts_at') or proposed.get('due_at') or proposed.get('local_date')):
         merged['temporal'] = proposed
+    elif precise and not previous.get('ends_at') and proposed.get('ends_at') and previous.get('starts_at') == proposed.get('starts_at'):
+        merged['temporal'] = {**previous, 'ends_at': proposed['ends_at']}
     merged['event_details'] = {key: old.get('event_details', {}).get(key) or suggestion.get('event_details', {}).get(key, '')
         for key in ('location', 'meeting_url')}
     if not old.get('company') and suggestion.get('company'):

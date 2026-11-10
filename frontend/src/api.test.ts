@@ -31,3 +31,7 @@ it('stops waiting when the original mail view has closed',async()=>{
  expect(await waitJob('example',{isCurrent:()=>false})).toBeNull();
  expect(fetch).not.toHaveBeenCalled();
 });
+it('explains mail body fetch failure without asking for a replacement credential',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,status:200,json:async()=>({data:{kind:'mail_sync',status:'failed',error_code:'MAIL_FETCH_FAILED'}})})));
+ await expect(waitJob('example')).rejects.toThrow('读取');
+});

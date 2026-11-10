@@ -1,10 +1,15 @@
 import {expect,it,vi} from 'vitest';
-import {reminderDraft,reminderChanges,saveAndTestMailbox} from './settings';
+import {reminderDraft,reminderChanges,saveAndTestMailbox,mailboxErrorMessage} from './settings';
 
 it('preserves selected mailbox provider',async()=>{
  const call=vi.fn().mockResolvedValueOnce({id:'163'}).mockResolvedValueOnce({job_id:'test'});
  await saveAndTestMailbox({accountId:''},{address:'a@163.com',code:'test',initialScan:'14',provider:'163'} as any,call,vi.fn());
  expect(call.mock.calls[0][2].provider).toBe('163');
+});
+it('separates mailbox authentication from retryable body failures',()=>{
+ expect(mailboxErrorMessage('MAIL_FETCH_FAILED')).toContain('读取');
+ expect(mailboxErrorMessage('MAIL_FETCH_FAILED')).not.toContain('更新授权码');
+ expect(mailboxErrorMessage('MAIL_AUTH_FAILED')).toContain('授权码');
 });
 
 it('converts reminder minutes and quiet hours to one settings patch',()=>{

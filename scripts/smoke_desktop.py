@@ -79,10 +79,12 @@ def check_ai(page, data):
             time.sleep(.6)
             source = json.loads(payload['messages'][-1]['content'])['body']
             action = {'kind': 'interview', 'quote': '请参加面试', 'company': '示例科技',
-                'time_quote': '11月16日8:30', 'location_quote': '地点：上海市示例路200号',
+                'time_quote': '11月16日晚间7点', 'date': '2026-11-16', 'time': '19:00',
+                'end_date': None, 'end_time': None, 'location_quote': '地点：上海市示例路200号',
                 'meeting_quote': source.splitlines()[-1]}
             content = 'invalid' if len(calls) == 1 else '```json\n' + json.dumps({'actions': [action]}, ensure_ascii=False) + '\n```'
-            raw = json.dumps({'choices': [{'message': {'content': content}}]}).encode()
+            raw = json.dumps({'choices': [{'finish_reason': 'length' if len(calls) == 2 else 'stop',
+                'message': {'content': '' if len(calls) == 2 else content}}]}).encode()
             self.send_response(200)
             self.send_header('Content-Length', str(len(raw)))
             self.end_headers()
@@ -94,7 +96,7 @@ def check_ai(page, data):
         page.click('收件识别')
         page.wait("document.querySelector('input[type=file]')")
         mail = ('From: hr@example.test\r\nSubject: 示例科技技术交流\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n'
-            '请参加面试，时间为11月16日8:30，11月17日9:30为备用场次。\n地点：上海市示例路200号\n会议链接：https://meet.example.test/room?token=SYNTHETIC')
+            '请参加面试，时间为11月16日晚间7点，11月17日9:30为备用场次。\n地点：上海市示例路200号\n会议链接：https://meet.example.test/room?token=SYNTHETIC')
         page.js("(()=>{const input=document.querySelector('input[type=file]');const dt=new DataTransfer();"
             f"dt.items.add(new File([{json.dumps(mail)}],'ai-synthetic.eml',{{type:'message/rfc822'}}));"
             "input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));})()")
@@ -113,15 +115,16 @@ def check_ai(page, data):
         page.click('AI 辅助识别（需启用）')
         page.wait("document.body.innerText.includes('AI 识别完成')")
         assert page.js("document.querySelector('.candidate-card input[type=date]').value") == '2026-11-16'
-        assert page.js("document.querySelector('.candidate-card input[type=time]').value") == '08:30'
+        assert page.js("document.querySelector('.candidate-card input[type=time]').value") == '19:00'
         assert page.js("[...document.querySelectorAll('.candidate-card input')].some(x=>x.value==='上海市示例路200号')")
         assert page.js("document.querySelector('.candidate-card input[type=url]').value") == 'https://meet.example.test/room?token=SYNTHETIC'
-        assert len(calls) == 2
+        assert len(calls) == 3
+        assert calls[2]['max_tokens'] > calls[1]['max_tokens']
         assert 'SYNTHETIC' not in json.dumps(calls)
         page.screenshot(data/'ai-complete-prefill.png')
         page.click('确认所选事件')
         page.wait("!document.querySelector('.modal')")
-        print('PASS: real local model HTTP, immediate AI progress, actionable invalid-output error, retry without version conflict, grounded date/time/location/link prefill and save')
+        print('PASS: local model HTTP, immediate progress, actionable error, retry without version conflict, bounded truncation recovery, event JSON, evening 19:00/date/location/link prefill and save')
     finally:
         page.js("(async()=>{const s=(await(await fetch('/api/v1/integrations/ai')).json()).data;return window.__qaAI('DELETE',{expected_version:s.version});})()")
         server.shutdown()

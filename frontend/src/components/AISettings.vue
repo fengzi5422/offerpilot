@@ -44,7 +44,7 @@ async function remove(){
 }
 async function test(){
  if(!canTest.value)return;
- operation.value='test';error.value='';message.value='正在用固定示例测试 AI 服务，通常需要几秒到半分钟，请稍候…';
+ operation.value='test';error.value='';message.value='正在用固定示例测试 AI 服务，通常需要几秒，自动恢复时最多约一分钟，请稍候…';
  try{
   const result=await request<{status:string}>('/integrations/ai/test','POST',{});
   if(result.status!=='validated')throw new Error();

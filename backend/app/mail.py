@@ -122,13 +122,45 @@ def normalize_chinese_clocks(text):
         r'(?P<minute>半|[一三]刻|(?:\d{1,2}|[零一二两三四五六七八九十]{1,3})分?)?', clock, text)
 
 
+def normalize_dayperiod_clocks(text):
+    """Resolve each local clock before parsing ranges; never apply PM globally."""
+    text = re.sub(r'(?<!\d)(?<!\d[:：])(\d{1,2})\s*([ap]\.?m\.?)\b', r'\1:00 \2', text, flags=re.I)
+    pattern = re.compile(r'(?:(?P<period>凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|晚间|夜里|夜间|午夜|晚|早)[ \t]*)?'
+        r'(?P<hour>\d{1,2})[:：](?P<minute>\d{1,2})(?:分)?(?:[ \t]*(?P<ampm>[ap]\.?m\.?(?![a-z])))?', re.I)
+    clocks = list(pattern.finditer(text))
+    output, cursor, inherited = [], 0, None
+    for index, match in enumerate(clocks):
+        period = match['period'] or (match['ampm'] or '').lower().replace('.', '') or None
+        gap = text[clocks[index - 1].end():match.start()] if index else ''
+        connected = bool(index and re.fullmatch(r'\s*[-—–~～至到]\s*', gap))
+        if not period and connected:
+            period = inherited
+        # In "7:00–9:00 PM" the suffix qualifies both ends of the range.
+        if not period and index + 1 < len(clocks):
+            following = clocks[index + 1]
+            if following['ampm'] and not following['period'] and re.fullmatch(
+                    r'\s*[-—–~～至到]\s*', text[match.end():following.start()]):
+                period = following['ampm'].lower().replace('.', '')
+        hour = int(match['hour'])
+        if period in ('下午', '傍晚', '晚上', '晚间', '夜里', '夜间', '晚', 'pm') and hour < 12:
+            hour += 12
+        elif period == '中午' and 1 <= hour <= 3:
+            hour += 12
+        elif period in ('凌晨', '午夜', 'am') and hour == 12:
+            hour = 0
+        inherited = period
+        output.extend((text[cursor:match.start()], f'{hour:02d}:{int(match["minute"]):02d}'))
+        cursor = match.end()
+    return ''.join(output) + text[cursor:]
+
+
 def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=None, internal_date=None, default_event_year=2026):
     original_text=text
     # Evidence retains the complete block; incidental clocks in addresses, URLs
     # and UTC offsets must not become competing event times.
     text=re.sub(r'(?m)^\s*(?:(?:面试|笔试|测评)\s*)?(?:地点|地址|会议链接|会议地址|线上链接)\s*[:：][^\n]*', '', text)
     text=re.sub(r'https?://[^\s<>]+', '', text)
-    text=normalize_chinese_clocks(text)
+    text=normalize_dayperiod_clocks(normalize_chinese_clocks(text))
     zone = "Asia/Shanghai" if re.search(r"北京时间|中国标准时间|Asia/Shanghai|(?:UTC|GMT)\+0?8(?::00)?(?![:\d])|\+08:00(?!\d)", text) else None
     if re.search(r"\bUTC\b(?!\+)|\bGMT\b(?!\+)|\bZ\b", text):
         zone = "UTC"
@@ -154,8 +186,6 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
             try:
                 start=datetime.fromisoformat(result['starts_at']).astimezone(ZoneInfo(result['timezone']))
                 end_hour=int(times[1]['hour'])
-                if re.search(r'下午|晚上',text) and end_hour<12:
-                    end_hour+=12
                 end=start.replace(hour=end_hour,minute=int(times[1]['minute'] or 0))
                 if (end.astimezone(timezone.utc).astimezone(end.tzinfo).replace(tzinfo=None)!=end.replace(tzinfo=None)
                         or end.replace(fold=0).utcoffset()!=end.replace(fold=1).utcoffset()):
@@ -175,8 +205,6 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
             if times:
                 t = times[0]
                 hour = int(t["hour"])
-                if re.search(r"下午|晚上", text) and hour < 12:
-                    hour += 12
                 minute = int(t["minute"] or 0)
                 local = day.replace(hour=hour, minute=minute, tzinfo=ZoneInfo(zone or default_timezone))
                 # Verify the local clock survives UTC conversion, rejecting nonexistent DST times.
@@ -224,8 +252,6 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
             if len(times) == 1:
                 try:
                     hour=int(times[0]['hour'])
-                    if re.search(r'下午|晚上',text) and hour<12:
-                        hour+=12
                     local = datetime.combine(day, reference.time()).replace(hour=hour,
                              minute=int(times[0]["minute"] or 0), second=0, microsecond=0, tzinfo=reference.tzinfo)
                     candidate["starts_at" if kind in ("interview", "written_exam") else "due_at"] = iso(local)
