@@ -73,6 +73,10 @@ class AIWorker:
                 raise AppError('AI_DISABLED', '请先在设置中配置并启用 AI', 409)
             return None
         with self.db.tx() as session:
+            if self.stopping.is_set():
+                if force:
+                    raise AppError('APP_STOPPING', '应用正在退出，请重新打开后识别', 503)
+                return None
             mail = get_record(session, Email, message_id)
             if expected_version is not None:
                 check_version(mail, expected_version)
@@ -132,7 +136,7 @@ class AIWorker:
             return
         with self.db.tx() as session:
             job = session.get(Job, job_id)
-            if not job or job.status != 'queued':
+            if self.stopping.is_set() or not job or job.status != 'queued':
                 return
             mail = session.get(Email, job.progress['message_id'])
             if (not mail or mail.ignored_by_user or mail.version != job.progress['mail_version'] or not mail.text_excerpt or

@@ -1,7 +1,11 @@
 [Setup]
+#ifdef IsolatedQA
+AppId=OfferPilot.Lite.IsolatedQA
+#else
 AppId=OfferPilot.Lite
+#endif
 AppName=OfferPilot Lite
-AppVersion=0.4.0
+AppVersion=1.0.0-rc.1
 DefaultDirName={localappdata}\Programs\OfferPilot
 DefaultGroupName=OfferPilot
 PrivilegesRequired=lowest
@@ -9,7 +13,11 @@ MinVersion=10.0
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
+#ifdef IsolatedQA
+OutputBaseFilename=OfferPilot-QA-Setup
+#else
 OutputBaseFilename=OfferPilot-Setup
+#endif
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -21,6 +29,7 @@ CloseApplicationsFilter=OfferPilot.exe
 [Files]
 Source: "..\dist\OfferPilot\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
+#ifndef IsolatedQA
 [Icons]
 Name: "{group}\OfferPilot"; Filename: "{app}\OfferPilot.exe"; AppUserModelID: "OfferPilot.Lite"
 Name: "{autodesktop}\OfferPilot"; Filename: "{app}\OfferPilot.exe"; AppUserModelID: "OfferPilot.Lite"
@@ -33,3 +42,4 @@ Type: files; Name: "{userstartup}\OfferPilot.lnk"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "OfferPilot"; Flags: uninsdeletevalue
+#endif

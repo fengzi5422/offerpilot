@@ -90,3 +90,15 @@
 - `.runtime/p3-restart-040`：正常退出、异常停止后重新打开，事件ID、时间、地点、默认年份、状态、提醒ID与计划一致，无重复任务。
 - `native_windows_probe.py`：仅新建随机probe凭据，Windows凭据管理器set/get/delete通过；未读取用户凭据，没有把通知渠道调用当作人工看到横幅。
 - `.runtime/p3-upgrade-022-040/upgrade-acceptance.json`：实际0.2.2创建数据后升级0.4.0保留原任务/申请/提醒；自动schema0004恢复点存在；0005准备事项创建及重启通过；复制恢复点到独立目录由0.2.2实际读回通过。6项检查为true。
+
+## 1.0.0-rc.1 最终交付记录
+
+- `.runtime/p3-check-rc1.log`：377 passed、前端63 passed；Ruff、vue-tsc/Vite通过；另执行uv lock --check --offline通过。仅有原有Starlette/httpx弃用提示1条。
+- `.runtime/p3-build-rc1.log`、`p3-installer-rc1.log`、`p3-installer-qa-rc1.log`：PyInstaller、正式与隔离QA安装器均成功构建。EXE SHA256为`3e87a5d9314cead5200468ff99f21fba071d270dff8a74a15db49334592ed9d8`。
+- `.runtime/p3-windows-rc1.log`、`p3-desktop-rc1.log`、`p3-restart-rc1.log`：实际EXE API、独立窗口、日期预填、申请/准备、改期/日历/托盘/恢复、正常与异常停止重启通过。准备清单截图已目视，复选框和文字同排。没有启动外部浏览器。
+- `.runtime/p3-installed-desktop-rc1.log`：安装后相同真实窗口流程通过，安装EXE与构建EXE哈希一致。QA构建只更换AppId并排除快捷方式、自启、卸载时自启清理与自动打开，不覆盖用户正式安装；因此不把此次结果当作正式安装快捷方式/注册行为的最终实测。
+- `.runtime/p3-uninstall-rc1.json`：仅卸载`p3-installed-rc1`专用QA副本，`p3-installed-data-rc1/data.sqlite`卸载前后SHA256一致；重新安装后打开原数据，所有原任务身份保持。没有卸载用户程序。
+- `.runtime/p3-upgrade-022-rc1/upgrade-acceptance.json`：真实归档0.2.2升级至1.0.0-rc.1，六项检查均true；任务/申请/提醒身份保持、外部集成默认关闭、升级前快照存在、新准备提醒重开保留、匹配旧schema快照用0.2.2读回。旧程序没有直接打开新schema。
+- 所有新数据为虚构隔离数据；0.2.2/0.3.0/0.4.0原包保留。候选安装器与完整便携ZIP及来源提交/哈希写入`dist/releases/1.0.0-rc.1/manifest.json`。Python元数据按PEP440记为`1.0.0rc1`，产品显示`1.0.0-rc.1`。
+
+当前可交付本机候选版。上方正式准入仍待实测，不能把候选包改称正式发布完成。系统关机期间程序不能执行提醒；现有重启测试覆盖正常/异常进程停止，不冒充物理断电或七天连续运行。

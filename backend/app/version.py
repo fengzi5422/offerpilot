@@ -1,2 +1,2 @@
 """Backend version; release checks verify other build manifests against it."""
-VERSION = '0.4.0'
+VERSION = '1.0.0-rc.1'

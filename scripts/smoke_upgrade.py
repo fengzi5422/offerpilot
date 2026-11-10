@@ -9,12 +9,15 @@ from multiprocessing.connection import Client
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'backend'))
+from app.version import VERSION  # noqa: E402
 
 
 def _fresh_directory(path):
@@ -159,7 +162,7 @@ def check(old_executable, executable, data_dir):
     assert _database(data_dir / 'data.sqlite') == '0004_event_details'
     checks['old022_created_tasks_application_and_reminders'] = True
 
-    with _program(executable, data_dir, '0.4.0') as client:
+    with _program(executable, data_dir, VERSION) as client:
         upgraded = _api(client, '/tasks/' + created['id'])
         assert _task_snapshot(upgraded) == before_task, 'upgrade changed task identity, content, version or reminders'
         assert _application_snapshot(_find_application(client, application['id'])) == before_application
@@ -181,7 +184,7 @@ def check(old_executable, executable, data_dir):
         prepared_task = _task_snapshot(_api(client, '/tasks/' + created['id']))
         preparation_task_id = preparations['items'][0]['reminder_task_id']
         preparation_task = _task_snapshot(_api(client, '/tasks/' + preparation_task_id))
-    with _program(executable, data_dir, '0.4.0') as client:
+    with _program(executable, data_dir, VERSION) as client:
         assert _api(client, route) == preparations
         assert _task_snapshot(_api(client, '/tasks/' + created['id'])) == prepared_task
         assert _task_snapshot(_api(client, '/tasks/' + preparation_task_id)) == preparation_task
@@ -199,7 +202,7 @@ def check(old_executable, executable, data_dir):
         assert len(_api(client, '/tasks')) == 1
         checks['old022_reads_matching_schema_recovery_point_with_original_identity'] = True
     assert _database(rollback_dir / 'data.sqlite') == '0004_event_details'
-    report = {'passed': True, 'simulation': True, 'programs_executed': ['0.2.2', '0.4.0'],
+    report = {'passed': True, 'simulation': True, 'programs_executed': ['0.2.2', VERSION],
         'created_at_utc': datetime.now(timezone.utc).isoformat(), 'checks': checks,
         'old_executable_sha256': _sha256(old_executable), 'executable_sha256': _sha256(executable),
         'pre_upgrade_sha256': _sha256(recovery_point), 'original_reminder_count': len(before_task['reminders']),
@@ -210,7 +213,7 @@ def check(old_executable, executable, data_dir):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='使用新隔离目录验收0.2.2到0.4.0实际程序升级与匹配schema回退')
+    parser = argparse.ArgumentParser(description='使用新隔离目录验收0.2.2到当前版本实际程序升级与匹配schema回退')
     parser.add_argument('--old-executable', type=Path, required=True)
     parser.add_argument('--executable', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
