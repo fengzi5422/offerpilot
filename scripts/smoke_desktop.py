@@ -56,6 +56,14 @@ class Page:
     def screenshot(self,path):
         path.write_bytes(base64.b64decode(self.call('Page.captureScreenshot',{'format':'png'})['data']))
 
+    def key(self,key,shift=False):
+        code={'Tab':9,'Escape':27,'Enter':13}[key]
+        params={'key':key,'code':key,'windowsVirtualKeyCode':code,'modifiers':8 if shift else 0}
+        if key=='Enter':
+            params.update(text='\r',unmodifiedText='\r')
+        self.call('Input.dispatchKeyEvent',{'type':'keyDown',**params})
+        self.call('Input.dispatchKeyEvent',{'type':'keyUp',**params})
+
 
 def check(executable,data,source=False):
     root=Path(__file__).resolve().parents[1]
@@ -126,7 +134,7 @@ def check(executable,data,source=False):
         page.wait("document.querySelector('.modal') && document.body.innerText.includes('已处理。以保存的事件信息为准')")
         page.click('查看并编辑已保存的事件 →')
         page.wait("document.querySelector('.modal-head')?.innerText.includes('编辑事件')")
-        # Select the last dialog explicitly: review and editor are sibling backdrops.
+        # Review is replaced by the editor; select its current backdrop explicitly.
         values=page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=date]').value")
         assert values=='2026-11-16',values
         assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]').value")=='08:30'
@@ -144,6 +152,11 @@ def check(executable,data,source=False):
         page.click('保存申请关联')
         page.wait("document.body.innerText.includes('申请关联已保存')")
         page.screenshot(data/'event-editor.png')
+        page.js("document.querySelector('.modal-head button').focus()")
+        page.key('Tab',shift=True)
+        assert page.js("document.activeElement?.textContent.trim()==='保存修改'"), 'Reverse Tab escaped the upper dialog'
+        page.key('Tab')
+        assert page.js("document.activeElement?.getAttribute('aria-label')==='关闭'"), 'Tab did not wrap inside upper dialog'
         # Confirm uses a native dialog in production; accept only this synthetic test's reschedule.
         page.js("window.confirm=()=>true;(()=>{const input=[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]');input.value='08:45';input.dispatchEvent(new Event('input',{bubbles:true}));})()")
         page.click('保存修改')
@@ -210,6 +223,36 @@ def check(executable,data,source=False):
         assert control('get_status')['visible'] is True
         page.wait("document.querySelector('.desktop') && !document.querySelector('.connection-state')")
         page.screenshot(data/'restored-window.png')
+        page.click('今日待办')
+        page.wait("[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='添加待办')")
+        page.js("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='添加待办').focus()")
+        page.key('Enter')
+        page.wait("document.querySelector('.modal input')")
+        assert page.js("document.activeElement?.getAttribute('aria-label')==='关闭'")
+        page.key('Escape')
+        page.wait("!document.querySelector('.modal')")
+        assert page.js("document.activeElement?.textContent.trim()==='添加待办'"), 'Closing the dialog did not restore focus'
+        # Halve CSS viewport and double device pixels, as browser zoom does.
+        # CSS zoom alone leaves media queries unchanged and is not equivalent.
+        # This is emulated content scaling, not physical monitor/DPI acceptance.
+        viewport=page.js('({width:innerWidth,height:innerHeight})')
+        page.call('Emulation.setDeviceMetricsOverride',{'width':viewport['width']//2,'height':viewport['height']//2,'deviceScaleFactor':2,'mobile':False})
+        for label in ('今日待办','申请看板','事件日历','设置与诊断'):
+            page.click(label)
+            page.wait("!document.querySelector('.loading-block')")
+            assert page.js('document.documentElement.scrollWidth<=innerWidth+1'), 'Horizontal overflow at 200%: '+label
+        page.screenshot(data/'content-scale-200.png')
+        page.click('今日待办')
+        page.wait("[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='添加待办')")
+        page.click('添加待办')
+        page.wait("document.querySelector('.modal input')")
+        assert page.js('document.documentElement.scrollWidth<=innerWidth+1'), 'Dialog overflow at 200%'
+        assert page.js("(()=>{const b=[...document.querySelectorAll('.modal button')].find(x=>x.textContent.trim()==='添加事件');b.focus();b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&r.left>=0&&r.right<=innerWidth;})()"), 'Save button is clipped at 200%'
+        page.screenshot(data/'dialog-scale-200.png')
+        page.key('Escape')
+        page.wait("!document.querySelector('.modal')")
+        page.call('Emulation.clearDeviceMetricsOverride')
+        print('PASS: WebView2 keyboard Enter/Tab/Shift-Tab/Escape, focus return, emulated 200% content scale across tasks/board/calendar/settings')
         print('PASS: actual WebView2, bootstrap, onboarding, UI mail import, date/time prefill, reschedule, calendar, close-to-tray, second launch restores window; no external browser launched')
     except Exception:
         if page:

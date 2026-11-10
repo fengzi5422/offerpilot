@@ -102,3 +102,9 @@
 - 所有新数据为虚构隔离数据；0.2.2/0.3.0/0.4.0原包保留。候选安装器与完整便携ZIP及来源提交/哈希写入`dist/releases/1.0.0-rc.1/manifest.json`。Python元数据按PEP440记为`1.0.0rc1`，产品显示`1.0.0-rc.1`。
 
 当前可交付本机候选版。上方正式准入仍待实测，不能把候选包改称正式发布完成。系统关机期间程序不能执行提醒；现有重启测试覆盖正常/异常进程停止，不冒充物理断电或七天连续运行。
+
+## RC1 补充验收（安装包不变）
+
+实际RC1程序在新建虚构目录`.runtime/p3-keyboard-scale-rc1-final`通过：编辑弹窗Tab/Shift+Tab循环；Enter打开待办、Esc关闭、焦点返回原按钮；任务/申请/日历/设置页面等效200%内容缩放无水平溢出；该缩放下新建弹窗保存按钮可滚动到达且不被遮挡。日志`.runtime/p3-keyboard-scale-rc1-final.log`，截图`content-scale-200.png`、`dialog-scale-200.png`。使用WebView2调试协议注入键盘并模拟缩放，不代表真实OS DPI、读屏或系统文件对话框人工验收。原生操作工具两次初始化失败，报`setup refresh had errors`/`trusted Node process exited unexpectedly`，故相关项继续待验。
+
+产品源码与安装包未改动；仅增强验收脚本及文档，不重新发相同版本包。真实试用入口与最短验收步骤见[候选版试用](p3-trial.md)。
