@@ -19,6 +19,11 @@ class SafeFormatter(logging.Formatter):
                   'level': record.levelname, 'event': event, 'module': record.name}
         if hasattr(record, 'error_id'):
             fields['error_id'] = str(record.error_id) if len(str(record.error_id)) == 32 else 'STARTUP_FAILED'
+        if getattr(record, 'error_code', None) in {
+            'UI_ASSETS_MISSING', 'LEGACY_INSTANCE_RUNNING', 'WEBVIEW2_UNAVAILABLE',
+            'WINDOW_OPEN_FAILED', 'STARTUP_FAILED',
+        }:
+            fields['error_code'] = record.error_code
         return json.dumps(fields, ensure_ascii=False)
 
 

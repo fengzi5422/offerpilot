@@ -59,7 +59,7 @@ class Diagnostics:
                     (('tasks',Task),('emails',Email),('reviews',Candidate),('jobs',Job))}
             known={'ready','syncing','paused','auth_required','network_error','removed'}
             states=dict(Counter(state if state in known else 'unknown' for state in session.scalars(select(Account.state))))
-        return {'version':'0.2.0','schema_revision':SCHEMA_REVISION,'ready':True,
+        return {'version':'0.2.1','schema_revision':SCHEMA_REVISION,'ready':True,
                 'workers':dict(self.worker_health),'database':{'status':'ready','journal_mode':'wal'},
                 'counts':counts,'account_states':states,'notification_channel':'windows','ai_enabled':False}
 

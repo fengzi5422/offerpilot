@@ -205,7 +205,7 @@ class DataTools:
                 counts = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                           for table in ("tasks", "applications", "email_messages", "mail_accounts")}
             content = stage.read_bytes()
-            manifest = {"format_version": 1, "app_version": "0.2.0", "schema_revision": SCHEMA_REVISION,
+            manifest = {"format_version": 1, "app_version": "0.2.1", "schema_revision": SCHEMA_REVISION,
                         "created_at": iso(self.clock()), "files": [{"name": "data.sqlite", "size": len(content),
                         "sha256": digest(content)}], "record_counts": counts, "contains_evidence": bool(include_evidence),
                         "credentials_included": False}

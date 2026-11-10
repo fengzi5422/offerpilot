@@ -2,12 +2,13 @@
 
 本地优先的招聘邮件、求职待办与提醒助手，目标平台 Windows 10/11。
 
-当前版本 0.2.0：已按用户实测反馈修复日期时间填入，并完成 P1 事件管理：地点/会议链接、候选日期、关联原事件改期/取消、周日历与冲突提示。自动化和本机验收通过；P0 真实邮箱七天、干净 Windows 和用户验收仍待完成。
+当前版本 0.2.1：采用 Windows 独立窗口，修复旧实例资源不完整时安装后打开 404；已按用户实测反馈修复日期时间填入，并完成 P1 事件管理：地点/会议链接、候选日期、关联原事件改期/取消、周日历与冲突提示。自动化和本机验收通过；P0 真实邮箱七天、干净 Windows 和用户验收仍待完成。
 
 - [当前进度与下一步](docs/progress.md)
 - [实施与验证日志](docs/implementation-log.md)
 - [P0 逐项验收与待验记录](docs/p0-acceptance.md)
 - [P1 事件管理验收](docs/p1-events-acceptance.md)
+- [独立窗口与启动修复验收](docs/desktop-acceptance.md)
 
 - [详细设计总览](docs/superpowers/specs/2026-11-09-offerpilot-design.md)
 - [评审与验收清单](docs/superpowers/specs/offerpilot/15-review-and-acceptance.md)
@@ -18,9 +19,13 @@
 
 ## 本机使用
 
-当前产物位于 `.worktrees/p0/dist/OfferPilot-Setup.exe`，可进行当前用户安装；便携版为同目录的 `OfferPilot/OfferPilot.exe`，需保留整个文件夹。关闭网页后后台托盘继续运行；托盘“退出”会停止同步与提醒。程序默认使用 `%LOCALAPPDATA%/OfferPilot`，开发与检查数据使用项目 `.runtime/`，互不混用。
+当前产物位于 `.worktrees/p0/dist/OfferPilot-Setup.exe`，可进行当前用户安装；便携版为同目录的 `OfferPilot/OfferPilot.exe`，需保留整个文件夹。关闭窗口后后台托盘继续运行；托盘“退出”会停止同步与提醒。程序默认使用 `%LOCALAPPDATA%/OfferPilot`，开发与检查数据使用项目 `.runtime/`，互不混用。
 
 当前用户要求保留的测试安装和指定数据目录见[进度记录](docs/progress.md)。该实例以关闭托盘的测试参数启动；普通快捷方式使用默认数据目录，不是同一实例。
+
+安装后从桌面或开始菜单打开独立窗口，不启动浏览器。会议等外部链接仍由系统打开。需要 Microsoft Edge WebView2 Runtime 与 .NET Framework 4.6.2+（Windows 10/11 通常已具备）；缺少时会显示中文提示，可从 [Microsoft 官方页面](https://developer.microsoft.com/microsoft-edge/webview2/) 安装运行组件。
+
+如果提示旧版正在使用数据，请先保存操作，从旧版托盘“退出”后重新打开新版；不需要卸载旧版，也不要删除本地数据。新版安装器不会强制关闭运行中的程序。
 
 首次可以跳过邮箱，先添加待办或导入 `.eml`。收件识别可直接核对日期、时刻、地点和会议链接；多日期点击候选填入。改期/取消邮件需选择原事件；日历支持跳转日期和点击编辑。QQ 邮箱使用 IMAP 授权码，凭据存 Windows 凭据管理器；规则解析不需要模型密钥。时间不明确时进入待确认，只有确认的精确时刻才安排定时提醒。
 

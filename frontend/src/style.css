@@ -7,3 +7,10 @@
 @media(max-width:520px){.calendar-grid{grid-template-columns:1fr}.calendar-day{min-height:120px}.calendar-day h3{flex-direction:row;align-items:center}.calendar-day h3 time{font-size:16px}.calendar-pending>strong{flex-basis:100%}}
 
 .calendar-jump{display:flex;flex-direction:row;align-items:center;gap:8px}.calendar-jump input{width:145px;min-height:38px}
+
+/* A stable work surface inside the native desktop window. */
+.desktop .sidebar{overflow-y:auto}
+.desktop .topbar{position:sticky;top:0;z-index:10;background:#faf9f5}
+.desktop .app-footer{flex-wrap:wrap;gap:10px}
+@media(max-height:740px){.desktop .sidebar-note{display:none}.desktop .brand{margin-bottom:25px}.desktop .sidebar-help{margin-top:auto}.desktop .page{padding-top:25px}.desktop .modal{max-height:calc(100vh - 32px)}}
+@media(max-width:1000px){.desktop .settings-grid{grid-template-columns:1fr}.desktop .page-heading{flex-wrap:wrap}.desktop .button-row{flex-wrap:wrap}}

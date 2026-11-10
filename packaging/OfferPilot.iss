@@ -1,7 +1,7 @@
 [Setup]
 AppId=OfferPilot.Lite
 AppName=OfferPilot Lite
-AppVersion=0.2.0
+AppVersion=0.2.1
 DefaultDirName={localappdata}\Programs\OfferPilot
 DefaultGroupName=OfferPilot
 PrivilegesRequired=lowest
@@ -14,7 +14,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\OfferPilot.exe
-CloseApplications=yes
+CloseApplications=no
+RestartApplications=no
 CloseApplicationsFilter=OfferPilot.exe
 
 [Files]

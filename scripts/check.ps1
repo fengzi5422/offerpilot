@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
-& uv run --frozen pytest backend/tests scripts/test_runtime.py -q
+& uv run --frozen pytest backend/tests scripts/test_runtime.py scripts/test_desktop.py -q
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & uv run --frozen ruff check backend scripts
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

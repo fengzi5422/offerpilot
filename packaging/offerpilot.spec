@@ -1,14 +1,18 @@
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
+import sys
 
 root = Path(SPECPATH).parent
+sys.path.insert(0, str(root / 'scripts'))
+from desktop_runtime import validate_assets
+validate_assets(root)
 datas = [(str(root / 'frontend' / 'dist'), 'frontend/dist'),
          (str(root / 'backend' / 'migrations'), 'backend/migrations')]
 binaries = []
 hiddenimports = ['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto',
                  'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on', 'sqlalchemy.dialects.sqlite',
                  'keyring.backends.Windows', 'pystray._win32']
-for package in ['tzdata', 'windows_toasts']:
+for package in ['tzdata', 'windows_toasts', 'webview', 'pythonnet', 'clr_loader']:
     d, b, h = collect_all(package)
     datas += d
     binaries += b
