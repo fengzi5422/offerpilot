@@ -11,7 +11,7 @@ try {
     & npm run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally { Pop-Location }
-$LaunchArgs = @('run', 'python', 'scripts/launcher.py', '--data-dir', (Join-Path $ProjectRoot '.runtime/dev'))
+$LaunchArgs = @('run', '--frozen', 'python', 'scripts/launcher.py', '--data-dir', (Join-Path $ProjectRoot '.runtime/dev'))
 if ($NoBrowser) { $LaunchArgs += '--no-browser' }
 if ($NoTray) { $LaunchArgs += '--no-tray' }
 & uv @LaunchArgs

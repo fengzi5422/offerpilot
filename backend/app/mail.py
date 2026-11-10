@@ -1,5 +1,7 @@
 import hashlib
 import re
+import threading
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
@@ -10,8 +12,8 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
-from app.domain import AppError, Temporal, iso, validated
-from app.persistence import Candidate, Email, Occurrence, audit, check_version, get_record
+from app.domain import AppError, Temporal, iso, millis, validated
+from app.persistence import Candidate, Email, MailCache, Occurrence, audit, check_version, get_record
 
 MAX_EML_BYTES = 10 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
@@ -238,6 +240,7 @@ def classify_and_parse(mail, default_timezone):
 class MailService:
     def __init__(self, db, tasks, settings, clock):
         self.db, self.tasks, self.settings, self.clock = db, tasks, settings, clock
+        self.parse_lock = threading.Lock()
 
     def ingest(self, raw, *, account_id=None, uidvalidity=None, message_uid=None, internal_date=None, session=None):
         normalized = normalize_mail(raw)
@@ -249,6 +252,17 @@ class MailService:
                                    internal_date=internal_date, session=s)
         existing_occurrence = session.scalar(select(Occurrence).where(Occurrence.occurrence_key == occurrence_key))
         if existing_occurrence:
+            record = get_record(session, Email, existing_occurrence.message_id)
+            if record.state == "parse_failed" and not record.ignored_by_user:
+                cache = session.get(MailCache, record.id)
+                if cache is None:
+                    cache = MailCache(message_id=record.id, content=normalized["text_excerpt"],
+                                      expires_at=millis(self.clock())+604800000)
+                    session.add(cache)
+                else:
+                    cache.content, cache.expires_at = normalized["text_excerpt"], millis(self.clock())+604800000
+                record.state, record.text_excerpt = "new", normalized["text_excerpt"][:4096]
+                record.version += 1
             return existing_occurrence.message_id
         same = list(session.scalars(select(Email).where(Email.canonical_digest == normalized["canonical_digest"])))
         existing = None
@@ -260,31 +274,90 @@ class MailService:
         if existing:
             mail = existing
         else:
-            mail = Email(**normalized, internal_date=internal_date, state="new", ignored_by_user=False)
+            text = normalized.pop("text_excerpt")
+            mail = Email(**normalized, text_excerpt=text[:4096], internal_date=internal_date,
+                         state="new", ignored_by_user=False, classification={"duplicate_candidate": bool(same)},
+                         created_at=millis(self.clock()))
             session.add(mail)
             session.flush()
-            classification, drafts = classify_and_parse(mail, self.settings.get(session)["timezone"])
-            mail.classification = classification
-            for draft in drafts:
-                if same:
-                    draft["issues"].append("DUPLICATE_CANDIDATE")
-                candidate = Candidate(message_id=mail.id, candidate=draft,
-                                      action_key=mail.id + ":" + hashlib.sha256(
-                                          (draft["kind"] + repr(draft["evidence"])).encode()).hexdigest(), state="open")
-                session.add(candidate)
-                session.flush()
-                if not draft["issues"] and not draft["temporal"]["needs_confirmation"]:
-                    task = self.tasks.create({key: draft[key] for key in ("title", "kind", "priority", "temporal")},
-                                             session=session, source={"message_id": mail.id, "subject": mail.subject,
-                                             "evidence": draft["evidence"]}, action_key=candidate.action_key)
-                    candidate.state, candidate.task_id = "accepted", task["id"]
-            session.flush()
-            open_count = session.scalar(select(Candidate.id).where(Candidate.message_id == mail.id, Candidate.state == "open"))
-            mail.state = "review_needed" if open_count else "parsed"
+            session.add(MailCache(message_id=mail.id, content=text, expires_at=millis(self.clock())+604800000))
         session.add(Occurrence(message_id=mail.id, occurrence_key=occurrence_key, account_id=account_id,
                                folder="INBOX" if account_id else None, uidvalidity=uidvalidity, uid=message_uid))
         session.flush()
         return mail.id
+
+    def parse_pending(self, limit=20):
+        if not self.parse_lock.acquire(blocking=False):
+            return
+        try:
+            with self.db.activity():
+                self.cleanup()
+                with self.db.read() as session:
+                    ids = list(session.scalars(select(Email.id).where(Email.state == "new")
+                                               .order_by(Email.created_at, Email.id).limit(min(limit, 20))))
+                for message_id in ids:
+                    try:
+                        self._parse(message_id)
+                    except Exception:
+                        with self.db.tx() as session:
+                            mail = get_record(session, Email, message_id)
+                            if mail.state == "new":
+                                mail.state, mail.classification = "parse_failed", {**mail.classification, "error_code": "PARSE_FAILED"}
+                                mail.version += 1
+                        self.db.log("parse.failed", module="parse", entity_id=message_id, error_code="PARSE_FAILED")
+        finally:
+            self.parse_lock.release()
+
+    def _parse(self, message_id):
+        with self.db.read() as session:
+            record = get_record(session, Email, message_id)
+            if record.state != "new" or record.ignored_by_user:
+                return
+            cache = session.get(MailCache, message_id)
+            if cache is None:
+                raise AppError("SOURCE_UNAVAILABLE", "临时正文已清理，请重新导入原邮件", 409)
+            version = record.version
+            duplicate = record.classification.get("duplicate_candidate", False)
+            fields = {column.name: getattr(record, column.name) for column in Email.__table__.columns}
+            fields["text_excerpt"] = cache.content
+            timezone = self.settings.get(session)["timezone"]
+        classification, drafts = classify_and_parse(SimpleNamespace(**fields), timezone)
+        with self.db.tx() as session:
+            mail = get_record(session, Email, message_id)
+            if mail.version != version or mail.state != "new" or mail.ignored_by_user:
+                return
+            mail.classification = {**classification, "duplicate_candidate": duplicate}
+            for draft in drafts:
+                if duplicate:
+                    draft["issues"].append("DUPLICATE_CANDIDATE")
+                action_key = mail.id+":"+hashlib.sha256((draft["kind"]+repr(draft["evidence"])).encode()).hexdigest()
+                if session.scalar(select(Candidate.id).where(Candidate.action_key == action_key)):
+                    continue
+                candidate = Candidate(message_id=mail.id, candidate=draft, action_key=action_key, state="open")
+                session.add(candidate)
+                session.flush()
+                if not draft["issues"] and not draft["temporal"]["needs_confirmation"]:
+                    task = self.tasks.create({key: draft[key] for key in ("title", "kind", "priority", "temporal")},
+                        session=session, source={"message_id": mail.id, "subject": mail.subject,
+                        "evidence": draft["evidence"]}, action_key=candidate.action_key)
+                    candidate.state, candidate.task_id = "accepted", task["id"]
+            session.flush()
+            mail.state = "review_needed" if session.scalar(select(Candidate.id).where(
+                Candidate.message_id == mail.id, Candidate.state == "open")) else "parsed"
+            mail.version += 1
+            session.delete(session.get(MailCache, message_id))
+            audit(session, mail, "mail.parsed", {"candidates": len(drafts)})
+            if mail.state == "review_needed":
+                self.db.log("parse.review_needed", module="parse", entity_id=message_id, count=len(drafts))
+
+    def cleanup(self):
+        with self.db.tx() as session:
+            for cache in session.scalars(select(MailCache).where(MailCache.expires_at <= millis(self.clock()))):
+                mail = session.get(Email, cache.message_id)
+                if mail and mail.state in ("new", "parse_failed"):
+                    mail.state, mail.classification = "parse_failed", {**mail.classification, "error_code": "SOURCE_CACHE_EXPIRED"}
+                    mail.version += 1
+                session.delete(cache)
 
     def serialize(self, mail, session, detail=False):
         data = {"id": mail.id, "version": mail.version, "subject": mail.subject, "from_addr": mail.from_addr,
@@ -330,6 +403,9 @@ class MailService:
                     candidate.state = "ignored"
                 mail.state, mail.ignored_by_user = "ignored", True
                 mail.version += 1
+                cache = session.get(MailCache, message_id)
+                if cache:
+                    session.delete(cache)
                 audit(session, mail, "mail.ignored")
                 return {"email": self.serialize(mail, session, True), "tasks": [], "task_ids": [], "new_version": mail.version}
             tasks = []
@@ -381,6 +457,17 @@ class MailService:
             check_version(mail, expected_version)
             if mail.ignored_by_user:
                 raise AppError("IGNORED_MESSAGE", "已忽略邮件不会自动重新解析", 409)
+            if mail.state == "new":
+                return {"message_id": mail.id}
+            if mail.state == "parse_failed":
+                cache = session.get(MailCache, message_id)
+                if cache is None or cache.expires_at <= millis(self.clock()):
+                    raise AppError("SOURCE_UNAVAILABLE", "临时正文已清理，请重新导入原邮件", 409)
+                mail.state = "new"
+                mail.version += 1
+                return {"message_id": mail.id}
+            if mail.classification.get("rule_version") == "rules-v1":
+                return {"message_id": mail.id, "unchanged": True, "source_is_excerpt": True}
             # Rules are versioned. Existing accepted actions and user fields are immutable to reparse.
             classification, drafts = classify_and_parse(mail, self.settings.get(session)["timezone"])
             mail.classification = classification

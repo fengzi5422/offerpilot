@@ -126,7 +126,7 @@ def main():
             while server_thread.is_alive():
                 server_thread.join(timeout=.5)
         stop()
-        server_thread.join(timeout=15)
+        server_thread.join(timeout=30)
         return 0
     except Exception:
         error_id = uuid.uuid4().hex

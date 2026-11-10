@@ -2,6 +2,7 @@ import threading
 import sys
 import sqlite3
 from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from alembic import command
@@ -11,7 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.domain import AppError, millis, uid, utcnow
 
-SCHEMA_REVISION = "0002_applications"
+SCHEMA_REVISION = "0003_parse_cache"
 
 
 class Base(DeclarativeBase):
@@ -114,6 +115,13 @@ class Email(Record, Base):
     classification: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class MailCache(Base):
+    __tablename__ = "mail_parse_cache"
+    message_id: Mapped[str] = mapped_column(ForeignKey("email_messages.id", ondelete="CASCADE"), primary_key=True)
+    content: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[int] = mapped_column(Integer, index=True)
+
+
 class Occurrence(Record, Base):
     __tablename__ = "mail_occurrences"
     message_id: Mapped[str] = mapped_column(ForeignKey("email_messages.id", ondelete="CASCADE"))
@@ -209,6 +217,11 @@ class Database:
         self.active_operations = 0
         self.maintenance_active = False
         self.task_locks = {}
+        self.log = lambda *args, **kwargs: None
+        self.closed = False
+        self.generation = 0
+        self.request_generation = ContextVar("database_generation", default=None)
+        self.on_replace = lambda: None
         self.engine = create_engine(f"sqlite:///{self.path.as_posix()}",
                                     connect_args={"check_same_thread": False, "timeout": 5})
         @event.listens_for(self.engine, "connect")
@@ -230,7 +243,7 @@ class Database:
             with closing(sqlite3.connect(str(self.path))) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 revisions = list(connection.execute("SELECT version_num FROM alembic_version")) if "alembic_version" in tables else []
-                if tables and (len(revisions) != 1 or revisions[0][0] not in ("0001_p0", SCHEMA_REVISION)):
+                if tables and (len(revisions) != 1 or revisions[0][0] not in ("0001_p0", "0002_applications", SCHEMA_REVISION)):
                     raise AppError("DATABASE_VERSION_UNSUPPORTED", "数据库版本不兼容，请使用对应版本或保留备份后恢复", 503)
                 previous = revisions[0][0] if revisions else None
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -252,10 +265,12 @@ class Database:
                 try:
                     with trial_engine.connect() as connection:
                         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                        connection.commit()
                         config.attributes["connection"] = connection
                         command.upgrade(config, SCHEMA_REVISION)
                         if (connection.exec_driver_sql("PRAGMA integrity_check").scalar() != "ok" or
-                                connection.exec_driver_sql("PRAGMA foreign_key_check").first()):
+                                connection.exec_driver_sql("PRAGMA foreign_key_check").first() or
+                                connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar() != SCHEMA_REVISION):
                             raise ValueError("Migration integrity check failed")
                 finally:
                     trial_engine.dispose()
@@ -264,7 +279,8 @@ class Database:
                 config.attributes["connection"] = connection
                 command.upgrade(config, SCHEMA_REVISION)
                 if (connection.exec_driver_sql("PRAGMA integrity_check").scalar() != "ok" or
-                        connection.exec_driver_sql("PRAGMA foreign_key_check").first()):
+                        connection.exec_driver_sql("PRAGMA foreign_key_check").first() or
+                        connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar() != SCHEMA_REVISION):
                     raise ValueError("Migration integrity check failed")
         except Exception:
             self.engine.dispose()
@@ -288,9 +304,27 @@ class Database:
         with self.write_lock:
             return self.task_locks.setdefault(task_id, threading.RLock())
 
+    def close(self):
+        with self.write_lock:
+            self.closed = True
+            self.engine.dispose()
+
+    def replaced(self):
+        self.generation += 1
+        self.on_replace()
+        self.request_generation.set(self.generation)
+
+    def _check_access(self):
+        if self.closed:
+            raise AppError("APP_STOPPING", "应用正在退出，请重新打开后继续", 503)
+        expected = self.request_generation.get()
+        if expected is not None and expected != self.generation:
+            raise AppError("SESSION_REQUIRED", "数据已恢复或重置，请从托盘重新打开", 401)
+
     @contextmanager
     def read(self):
         with self.write_lock, self.Session() as session:
+            self._check_access()
             yield session
 
     @contextmanager
@@ -329,11 +363,14 @@ class Database:
             yield active
             return
         with self.write_lock, self.Session() as session:
+            self._check_access()
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             self.local.session = session
             try:
                 yield session
                 session.commit()
+                for event in session.info.pop("events", []):
+                    self.log(event["event"], module=event["module"], entity_id=event["entity_id"])
             except Exception:
                 session.rollback()
                 raise
@@ -355,3 +392,5 @@ def check_version(record, expected):
 
 def audit(session, record, action, detail=None):
     session.add(Audit(entity_type=record.__tablename__, entity_id=record.id, action=action, detail=detail or {}))
+    session.info.setdefault("events", []).append({"event": action, "entity_id": record.id,
+                                                 "module": "tasks" if action.startswith("task.") else "mail"})

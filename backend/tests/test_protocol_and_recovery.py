@@ -114,4 +114,7 @@ def test_relative_mail_lists_date_and_receipt_references():
 
 def test_malformed_eml_returns_validation_error(client):
     response = client.post('/api/v1/emails/import', files={"file": ("bad.eml", b"not an email")})
-    assert response.status_code == 422
+    assert response.status_code == 202
+    client.app.state.services.jobs.run_once()
+    job=client.get('/api/v1/jobs/'+response.json()['data']['job_id']).json()['data']
+    assert job['status']=='failed' and job['error_code']=='INVALID_EML'

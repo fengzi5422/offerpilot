@@ -2,7 +2,7 @@
 
 `app.main.create_app(data_dir, *, origin, bootstrap_code=None, clock=None, notifier=None,
 mail_adapter=None, credential_store=None, start_workers=True, autostart_callback=None,
-static_dir=None)` builds the local API. The desktop launcher supplies the actual loopback
+static_dir=None, shutdown_timeout=15)` builds the local API. The desktop launcher supplies the actual loopback
 origin, protected data directory, process lock and autostart callback. The factory serves
 the built frontend and resolves packaged migrations from `backend/migrations`.
 
@@ -33,6 +33,11 @@ origin and CSRF header. API errors never include exception strings or input valu
 - Import/sync/export/backup APIs return `{job_id}`. Job detail is
   `{id,kind,status,progress,result,error_code,created_at,updated_at}`. Artifact jobs use
   `result.artifact_id`; EML import uses `result.message_id`.
+- Import/export/backup/restore validation/reparse/diagnostics return 202 with a queued job
+  before executing. Poll the job, then poll imported/reparsed mail until it leaves `new`.
+  Internal inputs are excluded from public job detail.
+- POST `/diagnostics/export` queues a ZIP with only `manifest.json`, `health.json`,
+  and up to 2000 allowlisted records in `logs.jsonl`; no business database is included.
 - Restore validation returns a job with `result.restore_id`. GET `/restores/{id}` provides
   `confirmation_token` and manifest/counts. Apply returns HTTP 202 with
   `{job_id,restored:true,session_reset:true,reauthorization_required:true}` after replacement.
@@ -48,6 +53,22 @@ immediate transaction. API command results for task creation, import, and review
 in the same transaction as business changes. Per-task locks order cancellation against
 delivery. An exclusive maintenance barrier drains active notification and IMAP operations
 before restore or privacy deletion.
+
+Current revision is `0003_parse_cache`. Ingest persists `new` mail without running rules.
+The independent parse worker runs every 2 seconds, at most 20 messages per batch, computing
+outside transactions and applying results with a version check. Normalized full text is
+bounded to 256 KiB, deleted on success and expires after 7 days; retained excerpts are
+at most 4096 characters. Per-message failures remain visible and do not block other mail.
+Retry uses a valid full cache; after expiration explicitly reimport the original EML.
+Accepted actions and manual fields survive retries.
+
+The maintenance worker runs every second and serializes persisted jobs. Safe queued or
+running jobs with inputs requeue after restart. EML/restore UUID inputs are deleted after
+completion. Periodic housekeeping removes expired caches, artifacts, confirmations and
+orphan staging files. Privacy deletion interrupts queued import/reparse jobs so deleted
+content cannot be resurrected. Reparse changes and success receipts commit atomically.
+Restore increments the database generation, rejects stale authenticated requests and
+clears sessions. Shutdown joins workers with a timeout and forbids late database writes.
 
 The reminder loop runs every 15 seconds. Definite non-delivery retries at 30 and 120
 seconds, at most three attempts. Uncertain results and interrupted sends are durable
@@ -71,7 +92,7 @@ Relative times expose Date/INTERNALDATE candidates without treating sync time as
 Snapshots use SQLite backup, not a copy of the active WAL file. Downloadable copies remove
 credential references, command/session tokens, active leases, and optionally source text;
 VACUUM removes deleted-page remnants. Restore verifies ZIP names/sizes/hashes, SQLite
-integrity/FKs, exact schema, and task temporal values before confirmation. Internal rollback
+integrity/FKs, allowlisted schema, settings, and task temporal values before confirmation. Internal rollback
 snapshots are retained locally. CSV values that could be spreadsheet formulas are escaped.
 CSV includes `kind=application` rows when applications were selected; JSON preserves both
 collections and task ownership.
@@ -87,10 +108,12 @@ Windows adapter uses the local OS API and treats an exception after dispatch as 
 Real QQ compatibility/7-day monitoring, Windows notification identity/permission behavior,
 sleep and shutdown on a clean user account, installer upgrade/rollback, and nontechnical
 user acceptance remain real-environment gates; simulated tests do not satisfy them.
-Rules intentionally prefer review over broad natural-language guessing. Restore currently
-accepts the exact current schema revision; importing older backup formats requires a
-future explicitly tested upgrade path. Long maintenance jobs run on a request worker and
-record persistent completed/failed jobs; they are not resumable background job executions.
+Rules intentionally prefer review over broad natural-language guessing. Restore accepts
+current and known `0001_p0`/`0002_applications` schemas, comparing with trusted local
+frozen migrations before upgrading an isolated copy. Views, triggers, unknown structures
+and future revisions are rejected. Numeric column positions and generated constraint names
+are not semantic differences. Supplied jobs, tokens, artifacts and full caches are cleared
+before replacement.
 While running, the backup worker creates a sanitized snapshot every 24 hours and retains
 five automatic ZIPs; manual and pre-restore/pre-upgrade snapshots are retained separately.
 Reminder templates, quiet hours, timezone and privacy are editable. Schedule changes drain

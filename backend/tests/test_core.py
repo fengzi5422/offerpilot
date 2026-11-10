@@ -69,6 +69,8 @@ def eml(text, subject="示例科技面试通知"):
 def import_mail(client, content):
     response = client.post("/api/v1/emails/import", files={"file": ("example.eml", content, "message/rfc822")})
     assert response.status_code == 202, response.text
+    client.app.state.services.jobs.run_once()
+    client.app.state.services.mail.parse_pending()
     job = client.get('/api/v1/jobs/' + response.json()["data"]["job_id"]).json()["data"]
     assert job["status"] == "succeeded", job
     return client.get('/api/v1/emails/' + job["result"]["message_id"]).json()["data"]
@@ -109,10 +111,12 @@ def test_backup_roundtrip_and_corruption(client):
     task = client.post("/api/v1/tasks", json=task_body()).json()["data"]
     response = client.post("/api/v1/backups", json={"include_evidence": False})
     assert response.status_code == 202, response.text
+    client.app.state.services.jobs.run_once()
     job = client.get('/api/v1/jobs/' + response.json()["data"]["job_id"]).json()["data"]
     archive = client.get('/api/v1/artifacts/' + job["result"]["artifact_id"]).content
     validated = client.post("/api/v1/restores/validate", files={"backup": ("backup.zip", archive)})
     assert validated.status_code == 202, validated.text
+    client.app.state.services.jobs.run_once()
     validation_job = client.get('/api/v1/jobs/' + validated.json()["data"]["job_id"]).json()["data"]
     assert validation_job["status"] == "succeeded", validation_job
     restore_id = validation_job["result"]["restore_id"]
@@ -121,7 +125,9 @@ def test_backup_roundtrip_and_corruption(client):
     assert client.post('/api/v1/restores/' + restore_id + '/apply',
                        json={"confirmation_token": preview["confirmation_token"]}).status_code in (202, 409)
     bad = client.post("/api/v1/restores/validate", files={"backup": ("bad.zip", b"not a zip")})
-    assert bad.status_code in (400, 422)
+    assert bad.status_code == 202
+    client.app.state.services.jobs.run_once()
+    assert client.get('/api/v1/jobs/'+bad.json()['data']['job_id']).json()['data']['error_code']=='BACKUP_INVALID'
 
 
 def test_unknown_notification_not_repeated(tmp_path):

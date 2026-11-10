@@ -43,6 +43,7 @@ def test_readonly_sync_cursor_and_uidvalidity_dedupe(tmp_path):
     job_id = services.accounts.queue_sync(account["id"])
     services.accounts.run_sync(job_id, account["id"])
     assert services.jobs.get(job_id)["status"] == "succeeded"
+    services.mail.parse_pending()
     assert len(services.tasks.list()) == 2
     adapter.uidvalidity = "456"
     job_id = services.accounts.queue_sync(account["id"], force=True)

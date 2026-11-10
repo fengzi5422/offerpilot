@@ -2,10 +2,11 @@
 
 本地优先的招聘邮件、求职待办与提醒助手，目标平台 Windows 10/11。
 
-当前阶段：P0 开发原型联调。2026-11-09 已批准推荐设计；任务、邮件识别与审核、提醒、账户、备份恢复及界面已有实现。真实邮箱长期运行和干净 Windows 安装验收仍未完成。
+当前阶段：P0 工程收尾已实现，正在进入真实环境验收。自动化与本机程序检查通过；真实邮箱七天、干净 Windows 和用户验收未完成，因此尚未规划 P1。
 
 - [当前进度与下一步](docs/progress.md)
 - [实施与验证日志](docs/implementation-log.md)
+- [P0 逐项验收与待验记录](docs/p0-acceptance.md)
 
 - [详细设计总览](docs/superpowers/specs/2026-11-09-offerpilot-design.md)
 - [评审与验收清单](docs/superpowers/specs/offerpilot/15-review-and-acceptance.md)
@@ -16,7 +17,9 @@
 
 ## 本机使用
 
-打包程序位于构建目录 `dist/OfferPilot/OfferPilot.exe`，双击打开。关闭网页后后台托盘继续运行；托盘“退出”会停止同步与提醒。程序默认使用 `%LOCALAPPDATA%/OfferPilot`，开发与检查数据使用项目 `.runtime/`，互不混用。
+当前产物位于 `.worktrees/p0/dist/OfferPilot-Setup.exe`，可进行当前用户安装；便携版为同目录的 `OfferPilot/OfferPilot.exe`，需保留整个文件夹。关闭网页后后台托盘继续运行；托盘“退出”会停止同步与提醒。程序默认使用 `%LOCALAPPDATA%/OfferPilot`，开发与检查数据使用项目 `.runtime/`，互不混用。
+
+当前用户要求保留的测试安装和指定数据目录见[进度记录](docs/progress.md)。该实例以关闭托盘的测试参数启动；普通快捷方式使用默认数据目录，不是同一实例。
 
 首次可以跳过邮箱，先添加待办或导入 `.eml`。QQ 邮箱使用 IMAP 授权码，凭据存 Windows 凭据管理器；规则解析不需要模型密钥。时间不明确时进入待确认，只有确认的精确时刻才安排定时提醒。
 
@@ -38,6 +41,8 @@ cd ..
 # Windows onedir；安装包另需 Inno Setup 的 ISCC.exe
 ./scripts/build_windows.ps1
 ./scripts/build_windows.ps1 -Installer
+# 未加入 PATH 时可指定编译器；也检查项目 .tool-cache/inno/compiler。
+./scripts/build_windows.ps1 -Installer -CompilerPath 'C:/path/to/ISCC.exe'
 ```
 
 `.env.example` 只记录非敏感配置示例，不自动加载；可通过启动参数 `--data-dir` 或 `OFFERPILOT_DATA_DIR` 指定目录。不要把授权码、真实邮件和数据库提交到 Git。
@@ -46,4 +51,6 @@ cd ..
 
 数据目录的 `logs/` 保存脱敏结构化日志，限制文件大小和轮换数量；业务变更另有数据库审计记录。日志不记录正文、授权码、会话密钥或链接查询参数。
 
-运行期间每 24 小时生成一次不含凭据的本机备份，在 `backups/automatic-*.zip` 保留最近五份；手动下载和恢复前快照独立保留。设置页提供 CSV/JSON、手动备份及两阶段恢复。恢复替换当前数据后，需从托盘重新打开并重新授权邮箱。自动备份只有程序运行时才会执行。
+运行期间每 24 小时生成一次不含凭据的本机备份，在 `backups/automatic-*.zip` 保留最近五份；手动下载和恢复前快照独立保留。设置页提供后台 CSV/JSON、备份、两阶段恢复和诊断包下载。已知旧备份先在隔离副本中校验并迁移。恢复替换当前数据后，需从托盘重新打开并重新授权邮箱。自动备份只有程序运行时才会执行。
+
+邮件独立后台解析；成功后删除临时全文，失败暂存最长 7 天。诊断仅下载版本、健康、数量和白名单日志，不含业务库、正文、邮箱地址或凭据，不自动上传。

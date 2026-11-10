@@ -15,7 +15,8 @@ from pathlib import Path
 from sqlalchemy import delete, select
 
 from app.domain import AppError, iso, millis, uid
-from app.persistence import (Account, Application, Artifact, Base, Candidate, Email, SCHEMA_REVISION, Setting, Task, Token, get_record)
+from app.persistence import (Account, Application, Artifact, Base, Candidate, Command, Email, Job, MailCache,
+                             SCHEMA_REVISION, Setting, Task, Token, get_record)
 
 MAX_BACKUP_BYTES = 128 * 1024 * 1024
 
@@ -38,6 +39,46 @@ class DataTools:
         self.backup_lock = threading.Lock()
         for directory in (self.artifact_dir, self.staging_dir, self.rollback_dir):
             directory.mkdir(exist_ok=True)
+
+    def stage_input(self, content):
+        name = uid() + ".input"
+        (self.staging_dir / name).write_bytes(content)
+        return name
+
+    def read_input(self, name):
+        if not re.fullmatch(r"[0-9a-f-]{36}\.input", str(name)):
+            raise AppError("JOB_INPUT_INVALID", "待处理文件无效，请重新选择", 422)
+        path = self.staging_dir / name
+        if path.is_symlink() or not path.is_file():
+            raise AppError("JOB_INPUT_UNAVAILABLE", "待处理文件已清理，请重新选择", 409)
+        return path.read_bytes()
+
+    def cleanup(self):
+        now = millis(self.clock())
+        with self.db.tx() as session:
+            for artifact in session.scalars(select(Artifact).where(Artifact.expires_at <= now)):
+                path = self.artifact_dir / artifact.name
+                if path.resolve().parent == self.artifact_dir.resolve():
+                    path.unlink(missing_ok=True)
+                session.delete(artifact)
+            for token in session.scalars(select(Token).where(Token.expires_at <= now)):
+                if token.kind == "restore":
+                    (self.staging_dir / (token.id + ".sqlite")).unlink(missing_ok=True)
+                session.delete(token)
+            session.execute(delete(Command).where(Command.expires_at <= now))
+            jobs = list(session.scalars(select(Job).where(Job.status.in_(["queued", "running"]))))
+            keep = {j.progress.get("input", {}).get("file") for j in jobs}
+            restores = set(session.scalars(select(Token.id).where(Token.kind == "restore")))
+            artifact_names = set(session.scalars(select(Artifact.name)))
+        for path in self.staging_dir.iterdir():
+            if path.is_file() and not path.is_symlink() and path.name not in keep and path.stem not in restores:
+                # Stage writes precede enqueue; allow one hour before removing an orphan.
+                if now - int(path.stat().st_mtime*1000) > 3600000:
+                    path.unlink(missing_ok=True)
+        for path in self.artifact_dir.iterdir():
+            if path.is_file() and not path.is_symlink() and path.name not in artifact_names:
+                if now - int(path.stat().st_mtime*1000) > 86400000:
+                    path.unlink(missing_ok=True)
 
     def _artifact(self, content, extension, media_type):
         artifact_id = uid()
@@ -96,7 +137,13 @@ class DataTools:
         return self._artifact(stream.getvalue().encode("utf-8-sig"), "csv", "text/csv; charset=utf-8")
 
     def backup(self, include_evidence=False):
-        return self._artifact(self._backup_content(include_evidence), "zip", "application/zip")
+        try:
+            result = self._artifact(self._backup_content(include_evidence), "zip", "application/zip")
+        except Exception:
+            self.db.log("backup.fail", module="backup", error_code="JOB_FAILED")
+            raise
+        self.db.log("backup.complete", module="backup")
+        return result
 
     def automatic_backup(self):
         """Keep five daily sanitized snapshots; manual and rollback files are independent."""
@@ -117,6 +164,7 @@ class DataTools:
                 partial.unlink(missing_ok=True)
             for old in (copies + [target])[:-5]:
                 old.unlink(missing_ok=True)
+            self.db.log("backup.complete", module="backup")
             return {"filename": name, "created_at": iso(self.clock())}
 
     def _backup_content(self, include_evidence=False):
@@ -127,7 +175,7 @@ class DataTools:
             with closing(sqlite3.connect(str(stage))) as connection:
                 connection.execute("PRAGMA secure_delete=ON")
                 connection.execute("UPDATE mail_accounts SET credential_ref=NULL,state='auth_required',last_job_id=NULL")
-                for table in ("api_commands", "maintenance_tokens", "artifacts", "maintenance_jobs"):
+                for table in ("api_commands", "maintenance_tokens", "artifacts", "maintenance_jobs", "mail_parse_cache"):
                     connection.execute(f"DELETE FROM {table}")
                 connection.execute("UPDATE reminders SET state='delivery_unknown',lease_until=NULL WHERE state='claimed'")
                 connection.execute("UPDATE notification_attempts SET result='delivery_unknown',finished_at=? WHERE finished_at IS NULL",
@@ -186,11 +234,14 @@ class DataTools:
                     raise ValueError()
                 if connection.execute("SELECT version_num FROM alembic_version").fetchone() != (SCHEMA_REVISION,):
                     raise ValueError()
-                actual = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
-                with closing(sqlite3.connect(str(self.db.path))) as current:
-                    expected = dict(current.execute("SELECT name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
-                if actual != expected:
+                from app.backup_schema import signature
+                if signature(path) != signature(self.db.path):
                     raise ValueError()
+                from app.tasks import DEFAULT_SETTINGS
+                profiles = connection.execute("SELECT value FROM settings WHERE id='profile'").fetchall()
+                if len(profiles) != 1 or not isinstance(profile := json.loads(profiles[0][0]), dict):
+                    raise ValueError()
+                self.tasks.settings._validate(DEFAULT_SETTINGS, profile)
                 for row in connection.execute("SELECT title,kind,priority,temporal,notes,status FROM tasks"):
                     from app.domain import TaskInput, validated
                     validated(TaskInput, {"title": row[0], "kind": row[1], "priority": row[2],
@@ -214,7 +265,7 @@ class DataTools:
                 if any(entry.flag_bits & 1 for entry in entries) or archive.getinfo("manifest.json").file_size > 65536:
                     raise ValueError()
                 manifest = json.loads(archive.read("manifest.json"))
-                if manifest.get("format_version") != 1 or manifest.get("schema_revision") != SCHEMA_REVISION:
+                if manifest.get("format_version") != 1 or manifest.get("schema_revision") not in ("0001_p0", "0002_applications", SCHEMA_REVISION):
                     raise AppError("BACKUP_VERSION_UNSUPPORTED", "备份版本不兼容，请使用对应版本应用", 422)
                 if manifest.get("credentials_included") is not False or len(manifest.get("files", [])) != 1:
                     raise ValueError()
@@ -230,16 +281,23 @@ class DataTools:
         path = self.staging_dir / (restore_id + ".sqlite")
         path.write_bytes(data)
         try:
+            migrated_from = self._upgrade_backup(path, manifest["schema_revision"])
             self._check_sqlite(path)
         except Exception:
             path.unlink(missing_ok=True)
             raise
-        value = {"restore_id": restore_id, "manifest": manifest, "file_hash": digest(data),
+        value = {"restore_id": restore_id, "manifest": manifest, "file_hash": digest(path.read_bytes()),
                  "fingerprint": self._fingerprint(), "confirmation_token": confirmation}
+        if migrated_from:
+            value["migrated_from"] = migrated_from
         with self.db.tx() as session:
             session.add(Token(id=restore_id, kind="restore", token_hash=digest(confirmation.encode()),
                               expires_at=millis(self.clock()) + 600000, value=value))
         return {"restore_id": restore_id, "record_counts": manifest["record_counts"]}
+
+    def _upgrade_backup(self, path, revision):
+        from app.backup_schema import validate_and_upgrade
+        return validate_and_upgrade(path, revision)
 
     def restore_preview(self, restore_id):
         with self.db.read() as session:
@@ -266,6 +324,13 @@ class DataTools:
                 connection.execute("UPDATE mail_accounts SET credential_ref=NULL,state='auth_required',last_job_id=NULL")
                 connection.execute("DELETE FROM api_commands")
                 connection.execute("DELETE FROM maintenance_tokens")
+                connection.execute("DELETE FROM maintenance_jobs")
+                connection.execute("DELETE FROM mail_parse_cache")
+                connection.execute("DELETE FROM artifacts")
+                profile = connection.execute("SELECT value FROM settings WHERE id='profile'").fetchone()
+                value = json.loads(profile[0])
+                value["autostart_enabled"] = False
+                connection.execute("UPDATE settings SET value=? WHERE id='profile'", (json.dumps(value),))
                 connection.execute("UPDATE reminders SET state='delivery_unknown',lease_until=NULL WHERE state='claimed'")
                 connection.commit()
             self.db.engine.dispose()
@@ -276,6 +341,7 @@ class DataTools:
             except OSError:
                 shutil.copyfile(rollback, self.db.path)
                 raise AppError("RESTORE_FAILED", "恢复替换失败，已保留恢复点", 503) from None
+            self.db.replaced()
             return {"restored": True, "reauthorization_required": True, "session_reset": True}
 
     def privacy_preview(self, scope):
@@ -308,6 +374,13 @@ class DataTools:
                 raise AppError("CONFIRMATION_REQUIRED", "清理预览已过期", 403)
             if token.value["fingerprint"] != self._fingerprint():
                 raise AppError("DATABASE_CHANGED", "数据已变化，请重新预览", 409)
+            for job in session.scalars(select(Job).where(Job.kind.in_(["eml_import", "reparse"]),
+                                                         Job.status.in_(["queued", "running"]))):
+                name = job.progress.get("input", {}).get("file")
+                if isinstance(name, str) and re.fullmatch(r"[0-9a-f-]{36}\.input", name):
+                    (self.staging_dir / name).unlink(missing_ok=True)
+                job.status, job.error_code = "interrupted", "PRIVACY_PURGED"
+                job.progress = {"phase": "interrupted", "completed": 0}
             if scope == "all":
                 references = [a.credential_ref for a in session.scalars(select(Account)) if a.credential_ref]
                 for reference in references:
@@ -317,9 +390,12 @@ class DataTools:
                 from app.tasks import DEFAULT_SETTINGS
                 session.add(Setting(id="profile", value=DEFAULT_SETTINGS.copy()))
             else:
+                session.execute(delete(MailCache))
                 for mail in session.scalars(select(Email)):
                     mail.text_excerpt, mail.links, mail.attachments = "", [], []
                     mail.version += 1
+                    if mail.state in ("new", "parse_failed"):
+                        mail.state, mail.classification = "parse_failed", {"error_code": "SOURCE_CLEARED"}
                     if scope == "source_evidence":
                         mail.subject, mail.from_addr, mail.message_id_header = "来源已清理", "", None
                 if scope == "source_evidence":
@@ -331,6 +407,7 @@ class DataTools:
                             task.version += 1
                 session.delete(token)
         if scope == "all":
+            self.db.replaced()
             for directory in (self.artifact_dir, self.staging_dir, self.rollback_dir):
                 for path in directory.iterdir():
                     if path.is_file() and path.resolve().parent == directory.resolve():

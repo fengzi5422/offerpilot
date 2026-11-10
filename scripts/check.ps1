@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent $PSScriptRoot)
-& uv run pytest backend/tests scripts/test_runtime.py -q
+& uv run --frozen pytest backend/tests scripts/test_runtime.py -q
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& uv run ruff check backend scripts
+& uv run --frozen ruff check backend scripts
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Push-Location frontend
 try {

@@ -35,3 +35,29 @@ def test_restore_maintenance_waits_for_inflight_delivery(tmp_path):
         worker.join(3)
         restorer.join(3)
     assert restored.is_set()
+
+
+def test_request_authenticated_before_restore_cannot_write_after_database_replacement(client, app, monkeypatch):
+    services=app.state.services
+    artifact=services.data_tools.backup()
+    path,_=services.data_tools.artifact(artifact['artifact_id'])
+    validated=services.data_tools.validate_restore(path.read_bytes())
+    preview=services.data_tools.restore_preview(validated['restore_id'])
+    entered,release=threading.Event(),threading.Event()
+    create=services.tasks.create
+    def delayed(*args,**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return create(*args,**kwargs)
+    monkeypatch.setattr(services.tasks,'create',delayed)
+    responses=[]
+    thread=threading.Thread(target=lambda:responses.append(client.post('/api/v1/tasks',json=task_body())))
+    thread.start()
+    assert entered.wait(2)
+    try:
+        services.data_tools.apply_restore(validated['restore_id'],preview['confirmation_token'])
+    finally:
+        release.set()
+        thread.join(3)
+    assert responses[0].status_code==401
+    assert services.tasks.list()==[]

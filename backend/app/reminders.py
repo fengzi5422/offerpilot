@@ -11,13 +11,17 @@ class WindowsNotifier:
         if sys.platform != "win32":
             return {"status": "unavailable", "error_code": "WINDOWS_ONLY"}
         try:
-            from windows_toasts import Toast, WindowsToaster
+            from windows_toasts import Toast, InteractableWindowsToaster
             toast = Toast()
             toast.text_fields = ["OfferPilot", payload["title"], payload.get("body", "请打开 OfferPilot 查看详情")]
-            WindowsToaster("OfferPilot", notifierAUMID="OfferPilot.Lite").show_toast(toast)
-            return {"status": "sent"}
+            toaster = InteractableWindowsToaster("OfferPilot", notifierAUMID="OfferPilot.Lite")
         except ImportError:
             return {"status": "unavailable", "error_code": "NOTIFICATION_UNAVAILABLE"}
+        except Exception:
+            return {"status": "unavailable", "error_code": "NOTIFICATION_SETUP_FAILED"}
+        try:
+            toaster.show_toast(toast)
+            return {"status": "sent"}
         except Exception:
             # Once handed to the OS, exceptions cannot prove non-delivery.
             return {"status": "unknown", "error_code": "NOTIFICATION_RESULT_UNKNOWN"}
@@ -123,6 +127,7 @@ class ReminderService:
                              else "你有一项待办即将到时")
                     payload = {"title": title, "task_id": task.id, "body": "任务时间临近，请打开 OfferPilot 查看安排"}
                 # No SQL transaction spans OS delivery. Per-task lock orders cancellation against sending.
+                self.db.log("reminder.claimed", module="reminders", entity_id=reminder_id)
                 result = self.deliver(payload)
                 with self.db.tx() as session:
                     reminder = get_record(session, Reminder, reminder_id)
@@ -146,6 +151,8 @@ class ReminderService:
                     reminder.version += 1
                     attempt.result, attempt.finished_at = reminder.state, now_finished
                     self._project(session, reminder, get_record(session, Task, task_id))
+                    self.db.log("reminder.result", module="reminders", entity_id=reminder_id,
+                                state=reminder.state, error_code=reminder.error_code)
         if missed:
             # Persist before attempting one summary; a crash never replays a historical batch.
             with self.db.tx() as session:

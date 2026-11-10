@@ -40,10 +40,12 @@ def test_no_action_email_can_be_ignored(client):
 def test_actual_restore_roundtrip_and_session_reset(client, app):
     task = client.post("/api/v1/tasks", json=task_body()).json()["data"]
     job_id = client.post("/api/v1/backups", json={}).json()["data"]["job_id"]
+    client.app.state.services.jobs.run_once()
     artifact_id = client.get('/api/v1/jobs/' + job_id).json()["data"]["result"]["artifact_id"]
     raw = client.get('/api/v1/artifacts/' + artifact_id).content
     client.patch('/api/v1/tasks/' + task["id"], json={"expected_version": 1, "changes": {"title": "changed"}})
     job_id = client.post("/api/v1/restores/validate", files={"backup": ("backup.zip", raw)}).json()["data"]["job_id"]
+    client.app.state.services.jobs.run_once()
     restore_id = client.get('/api/v1/jobs/' + job_id).json()["data"]["result"]["restore_id"]
     token = client.get('/api/v1/restores/' + restore_id).json()["data"]["confirmation_token"]
     restored = client.post('/api/v1/restores/' + restore_id + '/apply', json={"confirmation_token": token})
@@ -63,7 +65,9 @@ def test_zip_traversal_rejected_without_touching_tasks(client):
         archive.writestr("../data.sqlite", "bad")
         archive.writestr("manifest.json", "{}")
     result = client.post('/api/v1/restores/validate', files={"backup": ("evil.zip", stream.getvalue())})
-    assert result.status_code == 422
+    assert result.status_code == 202
+    client.app.state.services.jobs.run_once()
+    assert client.get('/api/v1/jobs/'+result.json()['data']['job_id']).json()['data']['error_code']=='BACKUP_INVALID'
     assert len(client.get('/api/v1/tasks').json()["data"]) == 1
 
 
@@ -82,6 +86,7 @@ def test_csv_formula_is_escaped(client):
     body["title"] = '=HYPERLINK("https://example.test")'
     client.post('/api/v1/tasks', json=body)
     job_id = client.post('/api/v1/exports', json={"format": "csv"}).json()["data"]["job_id"]
+    client.app.state.services.jobs.run_once()
     artifact_id = client.get('/api/v1/jobs/' + job_id).json()["data"]["result"]["artifact_id"]
     data = client.get('/api/v1/artifacts/' + artifact_id).content.decode('utf-8-sig')
     assert "'=HYPERLINK" in data

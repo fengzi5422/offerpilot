@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from app.data_tools import MAX_BACKUP_BYTES
 from app.domain import AppError, millis
 from app.mail import MAX_EML_BYTES
-from app.persistence import Command, SCHEMA_REVISION
+from app.persistence import Command
 
 
 def install_routes(app):
@@ -115,7 +115,7 @@ def install_routes(app):
         if len(raw) > MAX_EML_BYTES:
             raise AppError("FILE_TOO_LARGE", "EML 文件不能超过 10 MiB", 413)
         return await run_in_threadpool(command, request, {"sha256": hashlib.sha256(raw).hexdigest()},
-                    lambda: {"job_id": s.jobs.execute("eml_import", lambda: {"message_id": s.mail.ingest(raw)})}, 202)
+                    lambda: {"job_id": s.jobs.enqueue("eml_import", {"file": s.data_tools.stage_input(raw)})}, 202)
 
     @app.get("/api/v1/emails/{message_id}")
     def get_email(request: Request, message_id: str):
@@ -133,8 +133,8 @@ def install_routes(app):
     def reparse(request: Request, message_id: str, body: dict):
         if body.get("mode", "rules") != "rules":
             raise AppError("FEATURE_UNAVAILABLE", "当前版本仅支持规则解析", 400)
-        return command(request, body, lambda: {"job_id": s.jobs.execute("reparse", lambda: s.mail.reparse(
-            message_id, body.get("expected_version")))}, 202)
+        return command(request, body, lambda: {"job_id": s.jobs.enqueue("reparse", {
+            "message_id": message_id, "expected_version": body.get("expected_version")})}, 202)
 
     @app.get("/api/v1/accounts")
     def list_accounts(request: Request):
@@ -204,20 +204,21 @@ def install_routes(app):
 
     @app.get("/api/v1/diagnostics")
     def diagnostics(request: Request):
-        return respond(request, {"version": "0.1.0", "schema_revision": SCHEMA_REVISION, "ready": True,
-            "workers": s.worker_health, "database": {"status": "ready", "journal_mode": "wal"},
-            "accounts": s.accounts.list(), "notification_channel": "windows", "ai_enabled": False,
-            "counts": {"tasks": len(s.tasks.list()), "emails": len(s.mail.list()), "reviews": len(s.mail.reviews())}})
+        return respond(request, s.diagnostics.health())
+
+    @app.post("/api/v1/diagnostics/export")
+    def diagnostic_export(request: Request, body: dict):
+        return command(request, body, lambda: {"job_id": s.jobs.enqueue("diagnostic_export", {})}, 202)
 
     @app.post("/api/v1/exports")
     def export(request: Request, body: dict):
-        return command(request, body, lambda: {"job_id": s.jobs.execute("export", lambda: s.data_tools.export(
-            body.get("format"), body.get("entities")))}, 202, atomic=False)
+        return command(request, body, lambda: {"job_id": s.jobs.enqueue("export", {
+            "format": body.get("format"), "entities": body.get("entities")})}, 202)
 
     @app.post("/api/v1/backups")
     def backup(request: Request, body: dict):
-        return command(request, body, lambda: {"job_id": s.jobs.execute("backup", lambda: s.data_tools.backup(
-            body.get("include_evidence", False)))}, 202, atomic=False)
+        return command(request, body, lambda: {"job_id": s.jobs.enqueue("backup", {
+            "include_evidence": body.get("include_evidence", False)})}, 202)
 
     @app.get("/api/v1/artifacts/{artifact_id}")
     def artifact(artifact_id: str):
@@ -231,7 +232,7 @@ def install_routes(app):
         if len(raw) > MAX_BACKUP_BYTES:
             raise AppError("FILE_TOO_LARGE", "备份文件不能超过 128 MiB", 413)
         return await run_in_threadpool(command, request, {"sha256": hashlib.sha256(raw).hexdigest()},
-                lambda: {"job_id": s.jobs.execute("restore_validate", lambda: s.data_tools.validate_restore(raw))}, 202, False)
+                lambda: {"job_id": s.jobs.enqueue("restore_validate", {"file": s.data_tools.stage_input(raw)})}, 202, True)
 
     @app.get("/api/v1/restores/{restore_id}")
     def restore_preview(request: Request, restore_id: str):

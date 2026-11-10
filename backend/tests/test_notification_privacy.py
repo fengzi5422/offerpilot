@@ -34,7 +34,13 @@ def test_windows_notification_uses_installed_shortcut_identity(monkeypatch):
         def show_toast(self, toast):
             pass
 
-    monkeypatch.setitem(sys.modules, 'windows_toasts', SimpleNamespace(Toast=SimpleNamespace, WindowsToaster=Toaster))
+    # Match the installed library: WindowsToaster accepts only a display name;
+    # InteractableWindowsToaster owns the explicit AUMID contract.
+    class BasicToaster:
+        def __init__(self, applicationText):
+            pass
+    monkeypatch.setitem(sys.modules, 'windows_toasts', SimpleNamespace(Toast=SimpleNamespace,
+                        WindowsToaster=BasicToaster, InteractableWindowsToaster=Toaster))
     monkeypatch.setattr(sys, 'platform', 'win32')
     result = WindowsNotifier()({'title': 'test'})
     installer = (Path(__file__).parents[2] / 'packaging' / 'OfferPilot.iss').read_text(encoding='utf-8')
