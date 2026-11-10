@@ -1,10 +1,7 @@
-import imaplib
 import random
 import re
-import ssl
 import sys
 import threading
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
@@ -13,6 +10,7 @@ from email.utils import parsedate_to_datetime
 from sqlalchemy import select
 
 from app.domain import AppError, iso, millis, uid
+from app.mail_providers import MailProviderAdapter, provider_for_address, validate_authorization_code
 from app.persistence import Account, Job, check_version, get_record
 
 
@@ -118,8 +116,17 @@ class QQConnection:
 
     def _fetch(self, message_uid, fields):
         kind, response = self.connection.uid("FETCH", str(message_uid), fields)
-        if kind != "OK":
+        if kind != "OK" or not response:
             raise AppError("MAIL_FETCH_FAILED", "读取邮件失败，游标未推进", 503)
+        literals = [item for item in response if isinstance(item, tuple)]
+        if not literals:
+            raise AppError("MAIL_FETCH_FAILED", "邮件响应不完整，游标未推进", 503)
+        for item in literals:
+            if len(item) != 2 or not all(isinstance(part, bytes) for part in item):
+                raise AppError("MAIL_FETCH_FAILED", "邮件响应不完整，游标未推进", 503)
+            declared = re.search(rb"\{(\d+)\}\s*$", item[0])
+            if declared and len(item[1]) < int(declared[1]):
+                raise AppError("MAIL_FETCH_FAILED", "邮件响应被截断，游标未推进", 503)
         return response
 
     def fetch_message(self, message_uid):
@@ -161,24 +168,8 @@ class QQConnection:
         return {"raw": raw, "internal_date": internal_date}
 
 
-class QQAdapter:
-    @contextmanager
-    def open(self, address, credential):
-        connection = None
-        try:
-            connection = imaplib.IMAP4_SSL("imap.qq.com", 993, ssl_context=ssl.create_default_context(), timeout=30)
-            connection.login(address, credential)
-            yield QQConnection(connection)
-        except imaplib.IMAP4.error:
-            raise AppError("MAIL_AUTH_FAILED", "邮箱认证失败，请检查 IMAP 开关并更新授权码", 503) from None
-        except (OSError, TimeoutError):
-            raise AppError("MAIL_NETWORK_ERROR", "邮箱连接失败，请检查网络后重试", 503) from None
-        finally:
-            if connection:
-                try:
-                    connection.logout()
-                except Exception:
-                    pass
+class QQAdapter(MailProviderAdapter):
+    """Backward-compatible adapter name; routes all supported mail domains."""
 
 
 class AccountService:
@@ -203,9 +194,12 @@ class AccountService:
         address = str(value.get("address", "")).strip().lower()
         code = value.get("authorization_code")
         initial = str(value.get("initial_scan", "14"))
-        if value.get("provider", "qq") != "qq" or not re.fullmatch(r"[^\s@]{1,64}@(qq\.com|foxmail\.com)", address):
-            raise AppError("VALIDATION_ERROR", "请输入 QQ 或 Foxmail 邮箱地址", 422)
-        if not isinstance(code, str) or not 1 <= len(code) <= 512 or initial not in ("14", "30", "now"):
+        provider = value.get("provider", "qq")
+        if provider is None:
+            raise AppError("VALIDATION_ERROR", "请选择支持的邮箱服务", 422)
+        provider_for_address(address, provider)
+        validate_authorization_code(code)
+        if initial not in ("14", "30", "now"):
             raise AppError("VALIDATION_ERROR", "请输入授权码并选择同步范围", 422)
         with self.db.read() as session:
             existing = session.scalar(select(Account).where(Account.address == address))
@@ -229,6 +223,7 @@ class AccountService:
                 else:
                     account = Account(id=account_id, address=address)
                     session.add(account)
+                account.provider = provider
                 account.credential_ref, account.initial_scan, account.state = reference, initial, "ready"
                 account.scan_from = millis(self.clock() - timedelta(days=int(initial))) if initial != "now" else None
                 session.flush()
@@ -238,11 +233,11 @@ class AccountService:
             raise
 
     def credential(self, account_id, code):
-        if not isinstance(code, str) or not 1 <= len(code) <= 512:
-            raise AppError("VALIDATION_ERROR", "授权码无效", 422)
+        validate_authorization_code(code)
         with self.db.read() as session:
             account = get_record(session, Account, account_id)
             old_reference, address, version = account.credential_ref, account.address, account.version
+            provider_for_address(address, account.provider)
         reference = "mail:" + account_id + ":" + uid()
         self.vault.set(reference, code)
         try:
@@ -323,6 +318,7 @@ class AccountService:
                     self.jobs.update(job_id, status="interrupted", error_code="SYNC_PAUSED")
                     return
                 address, reference = account.address, account.credential_ref
+                provider_for_address(address, account.provider)
                 initial, scan_from, old_validity, last_uid = account.initial_scan, account.scan_from, account.uidvalidity, account.last_uid
             credential = self.vault.get(reference) if reference else None
             if not credential:
@@ -333,7 +329,10 @@ class AccountService:
                 if test:
                     with self.db.tx() as session:
                         account = get_record(session, Account, account_id)
-                        if account.state not in ("paused", "removed"):
+                        if account.state == "removed":
+                            self.jobs.update(job_id, status="interrupted", error_code="ACCOUNT_REMOVED")
+                            return
+                        if account.state != "paused":
                             account.state, account.last_error_code, account.next_sync_at = "ready", None, None
                     self.jobs.update(job_id, status="succeeded", result={"ok": True, "readonly": True})
                     return
@@ -344,6 +343,9 @@ class AccountService:
                     last_uid, scan_from = upper_uid, millis(self.clock())
                 with self.db.tx() as session:
                     account = get_record(session, Account, account_id)
+                    if account.state in ("paused", "removed"):
+                        self.jobs.update(job_id, status="interrupted", error_code="SYNC_PAUSED")
+                        return
                     account.uidvalidity, account.last_uid = validity, last_uid
                     account.initial_upper_uid = account.initial_upper_uid or upper_uid
                     account.scan_from, account.state = scan_from, "syncing"
@@ -359,6 +361,10 @@ class AccountService:
                         break
                     batch = [(message_uid, connection.fetch_message(message_uid)) for message_uid in uids]
                     with self.db.tx() as session:
+                        account = get_record(session, Account, account_id)
+                        if account.state in ("paused", "removed"):
+                            self.jobs.update(job_id, status="interrupted", error_code="SYNC_PAUSED")
+                            return
                         for message_uid, message in batch:
                             fetched += 1
                             received = message.get("internal_date")
@@ -374,8 +380,10 @@ class AccountService:
                     self.jobs.update(job_id, progress={**progress, "phase": "sync", "completed": fetched})
                 with self.db.tx() as session:
                     account = get_record(session, Account, account_id)
-                    if account.state not in ("paused", "removed"):
-                        account.state = "ready"
+                    if account.state in ("paused", "removed"):
+                        self.jobs.update(job_id, status="interrupted", error_code="SYNC_PAUSED")
+                        return
+                    account.state = "ready"
                     account.last_uid = max(last_uid, upper_uid)
                     account.last_sync_at = millis(self.clock())
                     account.next_sync_at = millis(self.clock()) + self.settings.get(session)["sync_interval_seconds"] * 1000

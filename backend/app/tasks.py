@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from app.domain import AppError, TaskInput, iso, millis, validated
-from app.persistence import Application, Reminder, Setting, Task, audit, check_version, get_record
+from app.persistence import Application, Preparation, Reminder, Setting, Task, audit, check_version, get_record
 from app.temporal_order import event_order
 
 DEFAULT_SETTINGS = {
@@ -114,6 +114,22 @@ class TaskService:
     def __init__(self, db, clock, settings):
         self.db, self.clock, self.settings = db, clock, settings
 
+    def sync_preparation(self, session, task):
+        item_id = (task.source or {}).get('preparation_id')
+        item = session.get(Preparation, item_id) if item_id else None
+        if not item or item.deleted or item.reminder_task_id != task.id:
+            return
+        if task.kind != 'custom':
+            raise AppError('VALIDATION_ERROR', '准备提醒需保留为个人待办类型，请在准备清单中调整', 422)
+        item.text, item.completed = task.title, task.status == 'done'
+        item.remind_at = None if task.status == 'cancelled' else task.due_at or task.starts_at
+        item.version += 1
+        item.updated_at = millis(self.clock())
+        parent = get_record(session, Task, item.task_id)
+        parent.version += 1
+        parent.updated_at = millis(self.clock())
+        audit(session, item, 'preparation.task_synced')
+
     def serialize(self, task, session):
         next_reminder = session.scalar(select(Reminder).where(Reminder.task_id == task.id,
             Reminder.state.in_(["pending", "retry_wait", "claimed"])).order_by(Reminder.fire_at))
@@ -140,9 +156,11 @@ class TaskService:
         task.confirmed = not temporal.needs_confirmation and temporal.precision == "minute"
         task.updated_at = millis(self.clock())
 
-    def rebuild(self, session, task):
+    def rebuild(self, session, task, *, webhook_only=False):
         for reminder in session.scalars(select(Reminder).where(Reminder.task_id == task.id,
                                             Reminder.state.in_(["pending", "retry_wait", "claimed"]))):
+            if webhook_only and not reminder.channel.startswith('webhook:'):
+                continue
             reminder.state = "suppressed"
             reminder.version += 1
         now = millis(self.clock())
@@ -150,7 +168,14 @@ class TaskService:
         if not task.confirmed or task.status not in ("pending", "in_progress") or not anchor or anchor <= now:
             return
         settings = self.settings.get(session)
-        for offset in settings["reminder_offsets_seconds"][task.kind]:
+        from app.integrations import CONSENT_VERSION
+        integration = session.get(Setting, 'integration:webhook')
+        channels = [] if webhook_only else ['windows']
+        if integration and integration.value.get('enabled') and integration.value.get('consent_version') == CONSENT_VERSION:
+            channels.append('webhook:' + str(integration.version))
+        exact = bool(task.source and task.source.get('preparation_id'))
+        offsets = [0] if exact else settings["reminder_offsets_seconds"][task.kind]
+        for offset in offsets:
             scheduled = anchor - offset * 1000
             if scheduled <= now:
                 continue
@@ -166,11 +191,18 @@ class TaskService:
                 if within:
                     end_date = local.date() + timedelta(days=1 if start >= end and current >= start else 0)
                     fire = millis(datetime.combine(end_date, end, zone))
-            session.add(Reminder(task_id=task.id, schedule_revision=task.schedule_revision,
-                                offset_seconds=offset, scheduled_for=scheduled, fire_at=fire,
-                                expires_at=min(fire + 600000, anchor), state="pending" if fire < anchor else "missed",
-                                idempotency_key=f"{task.id}:{task.schedule_revision}:windows:{offset}"))
+            for channel in channels:
+                session.add(Reminder(task_id=task.id, schedule_revision=task.schedule_revision, channel=channel,
+                                    offset_seconds=offset, scheduled_for=scheduled, fire_at=fire,
+                                    expires_at=fire + 600000 if exact else min(fire + 600000, anchor),
+                                    state="pending" if exact or fire < anchor else "missed",
+                                    idempotency_key=f"{task.id}:{task.schedule_revision}:{channel}:{offset}"))
         session.flush()
+
+    def integration_changed(self, kind, session):
+        if kind == 'webhook':
+            for task in session.scalars(select(Task)):
+                self.rebuild(session, task, webhook_only=True)
 
     def rebuild_all(self, session):
         for task in session.scalars(select(Task).where(Task.status.in_(["pending", "in_progress"]))):
@@ -189,8 +221,7 @@ class TaskService:
             existing = session.scalar(select(Task).where(Task.action_key == action_key))
             if existing:
                 return self.serialize(existing, session)
-        if data.application_id:
-            get_record(session, Application, data.application_id)
+        application = get_record(session, Application, data.application_id) if data.application_id else None
         task = Task(status="pending", schedule_revision=1, version=1, source=source, action_key=action_key,
                     manual_fields=list(value) if source is None else [])
         self._apply(task, data)
@@ -198,12 +229,21 @@ class TaskService:
         session.flush()
         self.rebuild(session, task)
         audit(session, task, "task.created", {"source": "manual" if source is None else "mail"})
+        if application:
+            application.version += 1
+            application.updated_at = millis(self.clock())
+            audit(session, application, "application.task_linked", {
+                "old_application_id": None, "new_application_id": application.id,
+                "task_id": task.id, "actor": "user", "at": iso(millis(self.clock())),
+                "application_version": application.version,
+            })
         return self.serialize(task, session)
 
     def get(self, task_id):
         with self.db.read() as session:
             result = self.serialize(get_record(session, Task, task_id), session)
             result["reminders"] = [{"id": r.id, "version": r.version, "state": r.state,
+                                    "channel": r.channel.split(':')[0],
                                     "fire_at": iso(r.fire_at), "error_code": r.error_code}
                                    for r in session.scalars(select(Reminder).where(Reminder.task_id == task_id)
                                                             .order_by(Reminder.fire_at))]
@@ -245,6 +285,8 @@ class TaskService:
         with self.db.task_lock(task_id), self.db.tx() as session:
             task = get_record(session, Task, task_id)
             check_version(task, expected_version)
+            if "application_id" in changes and changes["application_id"] != task.application_id:
+                raise AppError("VALIDATION_ERROR", "请在申请看板关联、移动或解除任务", 422)
             if "status" in changes:
                 if task.status not in ("pending", "in_progress") or changes["status"] not in ("pending", "in_progress"):
                     raise AppError("STATE_CONFLICT", "完成、取消和重开请使用对应操作", 409)
@@ -259,6 +301,7 @@ class TaskService:
                 task.schedule_revision += 1
                 self.rebuild(session, task)
             audit(session, task, "task.changed", {"fields": list(changes)})
+            self.sync_preparation(session, task)
             return self.serialize(task, session)
 
     def transition(self, task_id, expected_version, action):
@@ -273,4 +316,5 @@ class TaskService:
             task.schedule_revision += 1
             self.rebuild(session, task)
             audit(session, task, "task." + action)
+            self.sync_preparation(session, task)
             return self.serialize(task, session)

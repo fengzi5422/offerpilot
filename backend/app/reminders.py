@@ -1,4 +1,6 @@
 import sys
+import threading
+from contextlib import contextmanager
 
 from sqlalchemy import select
 
@@ -30,6 +32,12 @@ class WindowsNotifier:
 class ReminderService:
     def __init__(self, db, clock, settings, notifier):
         self.db, self.clock, self.settings, self.notifier = db, clock, settings, notifier
+        self.webhook = None
+        self.stopping = threading.Event()
+
+    def stop(self):
+        with self.db.outbound_gate:
+            self.stopping.set()
 
     def _project(self, session, reminder, task):
         item = session.scalar(select(Notification).where(Notification.reminder_id == reminder.id))
@@ -38,7 +46,8 @@ class ReminderService:
                                 state=reminder.state, detail={})
             session.add(item)
         item.state = reminder.state
-        item.detail = {"error_code": reminder.error_code, "scheduled_for": iso(reminder.scheduled_for)}
+        item.detail = {"error_code": reminder.error_code, "scheduled_for": iso(reminder.scheduled_for),
+                       "channel": reminder.channel.split(':')[0]}
 
     def recover(self):
         now = millis(self.clock())
@@ -55,11 +64,16 @@ class ReminderService:
                     reminder.state = "pending"
                 reminder.lease_until = None
 
-    def deliver(self, payload):
-        if not self.settings.get()["notifications_enabled"]:
+    def deliver(self, payload, channel='windows', guard=None):
+        if channel == 'windows' and not self.settings.get()["notifications_enabled"]:
             return {"status": "unavailable", "error_code": "NOTIFICATIONS_DISABLED"}
         try:
-            result = self.notifier(payload)
+            if channel.startswith('webhook:'):
+                if self.webhook is None:
+                    return {'status': 'unavailable', 'error_code': 'WEBHOOK_DISABLED'}
+                result = self.webhook({**payload, 'config_version': int(channel.partition(':')[2])}, guard=guard)
+            else:
+                result = self.notifier(payload)
             if isinstance(result, str):
                 result = {"status": result}
             return result or {"status": "sent"}
@@ -69,6 +83,8 @@ class ReminderService:
             return {"status": "unknown", "error_code": "DELIVERY_EXCEPTION"}
 
     def run_once(self):
+        if self.stopping.is_set():
+            return
         with self.db.activity():
             self._run_once()
 
@@ -126,18 +142,35 @@ class ReminderService:
                     title = (task.title if self.settings.get(session)["notification_privacy"] == "details"
                              else "你有一项待办即将到时")
                     payload = {"title": title, "task_id": task.id, "body": "任务时间临近，请打开 OfferPilot 查看安排"}
+                    payload['idempotency_key'] = reminder.idempotency_key
+                    channel, generation = reminder.channel, self.db.generation
                 # No SQL transaction spans OS delivery. Per-task lock orders cancellation against sending.
-                self.db.log("reminder.claimed", module="reminders", entity_id=reminder_id)
-                result = self.deliver(payload)
+                @contextmanager
+                def dispatch_guard():
+                    with self.db.read() as session:
+                        current = session.get(Reminder, reminder_id)
+                        current_task = session.get(Task, task_id)
+                        if (self.stopping.is_set() or self.db.generation != generation or not current or current.state != 'claimed' or
+                                not current_task or current_task.status not in ('pending', 'in_progress') or
+                                current_task.schedule_revision != current.schedule_revision):
+                            raise AppError('REMINDER_CANCELLED', '提醒已取消', 409)
+                    yield
+                self.db.safe_log("reminder.claimed", module="reminders", entity_id=reminder_id)
+                result = self.deliver(payload, channel, dispatch_guard)
+                if self.db.closed or self.db.generation != generation:
+                    return
                 with self.db.tx() as session:
                     reminder = get_record(session, Reminder, reminder_id)
+                    suppressed = reminder.state != 'claimed'
                     attempt = get_record(session, Attempt, attempt_id)
                     now_finished = millis(self.clock())
                     status = result.get("status", "unknown")
                     if status == "sent":
                         reminder.state = "sent"
                     elif status in ("retryable", "not_delivered"):
-                        if reminder.attempt_count < 3 and now_finished < reminder.expires_at:
+                        if suppressed:
+                            reminder.state = 'suppressed'
+                        elif reminder.attempt_count < 3 and now_finished < reminder.expires_at:
                             reminder.state = "retry_wait"
                             reminder.next_attempt_at = now_finished + (30000 if reminder.attempt_count == 1 else 120000)
                         else:
@@ -151,7 +184,7 @@ class ReminderService:
                     reminder.version += 1
                     attempt.result, attempt.finished_at = reminder.state, now_finished
                     self._project(session, reminder, get_record(session, Task, task_id))
-                    self.db.log("reminder.result", module="reminders", entity_id=reminder_id,
+                    self.db.safe_log("reminder.result", module="reminders", entity_id=reminder_id,
                                 state=reminder.state, error_code=reminder.error_code)
         if missed:
             # Persist before attempting one summary; a crash never replays a historical batch.
@@ -206,6 +239,7 @@ class ReminderService:
             new = Reminder(task_id=task.id, schedule_revision=task.schedule_revision, offset_seconds=0,
                            scheduled_for=fire, fire_at=fire, expires_at=min(fire + 600000, anchor),
                            parent_reminder_id=reminder.id, idempotency_key=reminder.id + ":snooze:" + uid())
+            new.channel = reminder.channel
             session.add(new)
             session.flush()
             return {"id": new.id, "version": new.version, "fire_at": iso(fire), "state": new.state}

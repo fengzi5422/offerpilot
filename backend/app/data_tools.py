@@ -16,13 +16,23 @@ from sqlalchemy import delete, select
 
 from app.domain import AppError, iso, millis, uid
 from app.persistence import (Account, Application, Artifact, Base, Candidate, Command, Email, Job, MailCache,
-                             SCHEMA_REVISION, Setting, Task, Token, get_record)
+                             SCHEMA_REVISION, SUPPORTED_REVISIONS, Preparation, Setting, Task, Token, get_record)
+from app.integrations import credential_references, sanitize_integration_settings, retry_pending_credentials
+from app.version import VERSION
 
 MAX_BACKUP_BYTES = 128 * 1024 * 1024
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def without_evidence(value):
+    if isinstance(value, list):
+        return [without_evidence(item) for item in value]
+    if isinstance(value, dict):
+        return {key: ([] if key == 'evidence' else '' if key == 'raw_text' else without_evidence(item)) for key, item in value.items()}
+    return value
 
 
 def snapshot(source, target):
@@ -102,19 +112,27 @@ class DataTools:
     def export(self, format_name, entities=None):
         if format_name not in ("csv", "json"):
             raise AppError("VALIDATION_ERROR", "导出格式无效", 422)
-        if entities is not None and (not isinstance(entities, list) or set(entities) - {"tasks", "applications"}):
+        if entities is not None and (not isinstance(entities, list) or set(entities) - {"tasks", "applications", "preparations"}):
             raise AppError("VALIDATION_ERROR", "导出对象无效", 422)
-        entities = entities or ["tasks", "applications"]
+        entities = entities or ["tasks", "applications", "preparations"]
         tasks = self.tasks.list() if "tasks" in entities else []
         from app.applications import ApplicationService
         applications = ApplicationService(self.db, self.clock).list()
         by_id = {application["id"]: application for application in applications}
         exported_applications = applications if "applications" in entities else []
+        preparations = []
+        if "preparations" in entities:
+            from app.preparation import PreparationService
+            with self.db.read() as session:
+                preparations = [PreparationService.serialize(item, session.get(Task, item.task_id))
+                    for item in session.scalars(select(Preparation).where(Preparation.deleted.is_(False))
+                                               .order_by(Preparation.created_at, Preparation.id))]
         if format_name == "json":
-            data = {"schema_version": 1, "exported_at": iso(self.clock()), "tasks": tasks, "applications": exported_applications}
+            data = {"schema_version": 1, "exported_at": iso(self.clock()), "tasks": tasks,
+                    "applications": exported_applications, "preparations": preparations}
             return self._artifact(json.dumps(data, ensure_ascii=False, indent=2).encode(), "json", "application/json")
         columns = ["id", "company", "position", "title", "kind", "status", "priority", "due_at_utc", "due_date",
-                   "starts_at_utc", "ends_at_utc", "location", "meeting_url", "timezone", "precision", "created_at_utc"]
+                   "starts_at_utc", "ends_at_utc", "location", "meeting_url", "timezone", "precision", "created_at_utc", "task_id", "completed", "remind_at_utc"]
         stream = io.StringIO(newline="")
         writer = csv.DictWriter(stream, columns)
         writer.writeheader()
@@ -122,6 +140,11 @@ class DataTools:
                          "title": a["position"] or a["company"], "kind": "application", "status": a["stage"],
                          "due_at": None, "starts_at": None, "temporal": {"precision": "unknown"},
                          "created_at": a["created_at"]} for a in exported_applications]
+        rows += [{"id": item["id"], "task_id": item["task_id"], "title": item["text"],
+                  "kind": "preparation", "status": "done" if item["completed"] else "pending",
+                  "completed": item["completed"], "remind_at_utc": item["remind_at"],
+                  "due_at": None, "starts_at": None, "temporal": {"precision": "unknown"},
+                  "created_at": item["created_at"]} for item in preparations]
         for task in rows:
             row = {key: task.get(key, "") or "" for key in columns}
             application = by_id.get(task.get("application_id"))
@@ -196,14 +219,20 @@ class DataTools:
                     connection.execute("UPDATE email_messages SET text_excerpt='',links='[]',attachments='[]'")
                     for candidate_id, encoded in connection.execute("SELECT id,candidate FROM review_items").fetchall():
                         candidate = json.loads(encoded)
-                        candidate["evidence"] = []
+                        candidate = without_evidence(candidate)
                         connection.execute("UPDATE review_items SET candidate=? WHERE id=?", (json.dumps(candidate), candidate_id))
-                    for task_id, encoded in connection.execute("SELECT id,source FROM tasks WHERE source IS NOT NULL").fetchall():
+                    for task_id, encoded, temporal, manual in connection.execute(
+                            "SELECT id,source,temporal,manual_fields FROM tasks WHERE source IS NOT NULL").fetchall():
                         source = json.loads(encoded)
                         if source:
-                            source["evidence"] = []
+                            if not source.get('preparation_id') and 'temporal' not in json.loads(manual):
+                                connection.execute('UPDATE tasks SET temporal=? WHERE id=?',
+                                    (json.dumps(without_evidence(json.loads(temporal))), task_id))
+                            source = without_evidence(source)
+                            source['evidence'] = []
                             source["evidence_unavailable"] = True
                             connection.execute("UPDATE tasks SET source=? WHERE id=?", (json.dumps(source), task_id))
+                sanitize_integration_settings(connection)
                 settings = connection.execute("SELECT value FROM settings WHERE id='profile'").fetchone()
                 if settings:
                     value = json.loads(settings[0])
@@ -214,9 +243,9 @@ class DataTools:
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise AppError("BACKUP_INVALID", "备份完整性校验失败", 503)
                 counts = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                          for table in ("tasks", "applications", "email_messages", "mail_accounts")}
+                          for table in ("tasks", "applications", "email_messages", "mail_accounts", "preparations")}
             content = stage.read_bytes()
-            manifest = {"format_version": 1, "app_version": "0.2.2", "schema_revision": SCHEMA_REVISION,
+            manifest = {"format_version": 1, "app_version": VERSION, "schema_revision": SCHEMA_REVISION,
                         "created_at": iso(self.clock()), "files": [{"name": "data.sqlite", "size": len(content),
                         "sha256": digest(content)}], "record_counts": counts, "contains_evidence": bool(include_evidence),
                         "credentials_included": False}
@@ -231,7 +260,7 @@ class DataTools:
     def _fingerprint(self):
         with self.db.read() as session:
             state = []
-            for cls in (Task, Email, Account, Setting, Application):
+            for cls in (Task, Preparation, Email, Account, Setting, Application):
                 state.extend((cls.__tablename__, record.id, record.version)
                              for record in session.scalars(select(cls).order_by(cls.id)))
             return digest(json.dumps(state).encode())
@@ -260,7 +289,20 @@ class DataTools:
                                           "temporal": json.loads(row[3]), "notes": row[4]})
                     if row[5] not in ("pending", "in_progress", "done", "cancelled"):
                         raise ValueError()
-        except (sqlite3.DatabaseError, ValueError, TypeError, AppError):
+                for row in connection.execute("SELECT text,completed,deleted,remind_at,version,parent_schedule_revision,"
+                                              "task_id,reminder_task_id,id FROM preparations"):
+                    if (not isinstance(row[0], str) or not 1 <= len(row[0].strip()) <= 200
+                            or row[1] not in (0, 1) or row[2] not in (0, 1)
+                            or (row[3] is not None and type(row[3]) is not int)
+                            or type(row[4]) is not int or row[4] < 1
+                            or type(row[5]) is not int or row[5] < 1):
+                        raise ValueError()
+                    if row[7]:
+                        linked = connection.execute("SELECT kind,source FROM tasks WHERE id=?", (row[7],)).fetchone()
+                        source = json.loads(linked[1]) if linked and linked[1] else {}
+                        if not linked or linked[0] != "custom" or source.get("preparation_id") != row[8] or row[7] == row[6]:
+                            raise ValueError()
+        except (sqlite3.DatabaseError, ValueError, TypeError, AttributeError, AppError):
             raise AppError("BACKUP_SCHEMA_INVALID", "备份数据库结构或完整性校验失败", 422) from None
 
     def validate_restore(self, content):
@@ -277,7 +319,7 @@ class DataTools:
                 if any(entry.flag_bits & 1 for entry in entries) or archive.getinfo("manifest.json").file_size > 65536:
                     raise ValueError()
                 manifest = json.loads(archive.read("manifest.json"))
-                if manifest.get("format_version") != 1 or manifest.get("schema_revision") not in ("0001_p0", "0002_applications", "0003_parse_cache", SCHEMA_REVISION):
+                if manifest.get("format_version") != 1 or manifest.get("schema_revision") not in SUPPORTED_REVISIONS:
                     raise AppError("BACKUP_VERSION_UNSUPPORTED", "备份版本不兼容，请使用对应版本应用", 422)
                 if manifest.get("credentials_included") is not False or len(manifest.get("files", [])) != 1:
                     raise ValueError()
@@ -333,6 +375,7 @@ class DataTools:
             snapshot(self.db.path, rollback)
             # Re-sanitize supplied databases; manifest assertions alone are not trusted.
             with closing(sqlite3.connect(str(path))) as connection:
+                sanitize_integration_settings(connection)
                 connection.execute("UPDATE mail_accounts SET credential_ref=NULL,state='auth_required',last_job_id=NULL")
                 connection.execute("DELETE FROM api_commands")
                 connection.execute("DELETE FROM maintenance_tokens")
@@ -363,7 +406,8 @@ class DataTools:
         with self.db.read() as session:
             counts = {"tasks": len(list(session.scalars(select(Task.id)))),
                       "emails": len(list(session.scalars(select(Email.id)))),
-                      "accounts": len(list(session.scalars(select(Account.id))))}
+                      "accounts": len(list(session.scalars(select(Account.id)))),
+                      "preparations": len(list(session.scalars(select(Preparation.id))))}
         with self.db.tx() as session:
             session.add(Token(id=token_id, kind="privacy", token_hash=digest(secret.encode()),
                               expires_at=millis(self.clock()) + 600000,
@@ -395,12 +439,17 @@ class DataTools:
                 job.progress = {"phase": "interrupted", "completed": 0}
             if scope == "all":
                 references = [a.credential_ref for a in session.scalars(select(Account)) if a.credential_ref]
-                for reference in references:
-                    self.vault.delete(reference)
+                references += credential_references(session)
+                pending = session.get(Setting, 'credential_cleanup')
+                if pending:
+                    references += pending.value.get('references', [])
                 for table in reversed(Base.metadata.sorted_tables):
                     session.execute(delete(table))
                 from app.tasks import DEFAULT_SETTINGS
                 session.add(Setting(id="profile", value=DEFAULT_SETTINGS.copy()))
+                if references:
+                    session.add(Setting(id='credential_cleanup', value={'references': list(dict.fromkeys(references))}))
+                    session.info.setdefault('commit_callbacks', []).append(lambda: retry_pending_credentials(self.db, self.vault))
             else:
                 session.execute(delete(MailCache))
                 for mail in session.scalars(select(Email)):
@@ -412,10 +461,13 @@ class DataTools:
                         mail.subject, mail.from_addr, mail.message_id_header = "来源已清理", "", None
                 if scope == "source_evidence":
                     for candidate in session.scalars(select(Candidate)):
-                        candidate.candidate = {**candidate.candidate, "evidence": []}
+                        candidate.candidate = {**without_evidence(candidate.candidate), "evidence": []}
                     for task in session.scalars(select(Task)):
                         if task.source:
-                            task.source = {"source_unavailable": True}
+                            if not task.source.get('preparation_id') and 'temporal' not in task.manual_fields:
+                                task.temporal = without_evidence(task.temporal)
+                            task.source = ({"preparation_id": task.source["preparation_id"]}
+                                           if task.source.get("preparation_id") else {"source_unavailable": True})
                             task.version += 1
                 session.delete(token)
         if scope == "all":
@@ -424,4 +476,6 @@ class DataTools:
                 for path in directory.iterdir():
                     if path.is_file() and path.resolve().parent == directory.resolve():
                         path.unlink(missing_ok=True)
-        return {"scope": scope, "purged": True, "downloaded_files_remain": True}
+        with self.db.read() as session:
+            pending = session.get(Setting, 'credential_cleanup') is not None
+        return {"scope": scope, "purged": True, "downloaded_files_remain": True, 'credential_cleanup_pending': pending}

@@ -5,9 +5,9 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Push-Location frontend
 try {
-    & npm ci --registry=https://registry.npmjs.org
+    & npm.cmd ci --registry=https://registry.npmjs.org
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & npm run build
+    & npm.cmd run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally { Pop-Location }
 & uv run --frozen pyinstaller --noconfirm packaging/offerpilot.spec

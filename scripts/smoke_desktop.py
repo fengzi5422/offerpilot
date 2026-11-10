@@ -16,6 +16,10 @@ import time
 import httpx
 import websocket
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
+from app.version import VERSION
+
 
 class Page:
     def __init__(self, url):
@@ -94,9 +98,22 @@ def check(executable,data,source=False):
         page.wait("document.body.innerText.includes('求职路上')")
         page.click('先体验待办')
         page.wait("!document.querySelector('.modal') && document.querySelector('.desktop')")
-        assert page.js("navigator.userAgent.includes('OfferPilotDesktop/0.2.2')")
+        assert page.js(f"navigator.userAgent.includes('OfferPilotDesktop/{VERSION}')")
         page.click('设置与诊断')
         page.wait("document.querySelector('input[type=number]')?.value==='2026'")
+        page.wait("document.querySelector('.ai-settings form') && document.querySelector('.hook-settings form')")
+        assert page.js("[...document.querySelectorAll('.ai-settings input[type=checkbox]')].every(x=>!x.checked)")
+        assert page.js("document.documentElement.scrollWidth<=innerWidth")
+        page.screenshot(data/'p3-settings.png')
+        page.click('申请看板')
+        page.wait("document.body.innerText.includes('新建申请')")
+        page.click('新建申请')
+        page.wait("document.querySelector('.modal input')")
+        page.js("(()=>{const inputs=document.querySelectorAll('.modal input');for(const [i,value] of ['示例科技','开发工程师'].entries()){inputs[i].value=value;inputs[i].dispatchEvent(new Event('input',{bubbles:true}));}})()")
+        page.click('创建申请')
+        page.wait("document.body.innerText.includes('申请已保存')")
+        page.click('关闭')
+        page.screenshot(data/'p3-board.png')
         page.click('收件识别')
         page.wait("document.querySelector('input[type=file]')!==null")
         mail=('From: hr@example.test\r\nSubject: 示例科技面试安排\r\n'
@@ -114,6 +131,18 @@ def check(executable,data,source=False):
         assert values=='2026-11-16',values
         assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]').value")=='08:30'
         assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).innerText.includes('地点')")
+        page.wait("[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='添加准备模板'&&!b.disabled)")
+        page.click('添加准备模板')
+        page.wait("document.querySelectorAll('.preparation-items li').length===4")
+        page.js("document.querySelector('.preparation-items input[type=checkbox]').click()")
+        page.wait("document.querySelectorAll('.preparation-items li.completed').length===1")
+        page.js("document.querySelector('.preparation-checklist').scrollIntoView({block:'center'})")
+        page.screenshot(data/'p3-preparation.png')
+        page.js("[...document.querySelectorAll('.modal summary')].find(x=>x.textContent.trim()==='关联求职申请').click()")
+        page.wait("[...document.querySelectorAll('.modal button')].some(b=>b.textContent.trim()==='保存申请关联')")
+        page.js("(()=>{const select=[...document.querySelectorAll('.modal select')].find(x=>[...x.options].some(o=>o.text.includes('开发工程师')));select.value=select.options[1].value;select.dispatchEvent(new Event('change',{bubbles:true}));})()")
+        page.click('保存申请关联')
+        page.wait("document.body.innerText.includes('申请关联已保存')")
         page.screenshot(data/'event-editor.png')
         # Confirm uses a native dialog in production; accept only this synthetic test's reschedule.
         page.js("window.confirm=()=>true;(()=>{const input=[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]');input.value='08:45';input.dispatchEvent(new Event('input',{bubbles:true}));})()")
@@ -132,7 +161,7 @@ def check(executable,data,source=False):
                 assert pipe.poll(20)
                 return pipe.recv()
 
-        assert control('get_status')=={'version':'0.2.2','ui':'desktop','visible':True}
+        assert control('get_status')=={'version':VERSION,'ui':'desktop','visible':True}
         page.js('window.__qaRetained=true')
         second=subprocess.run(command,env=env,creationflags=subprocess.CREATE_NO_WINDOW,timeout=35)
         assert second.returncode==0

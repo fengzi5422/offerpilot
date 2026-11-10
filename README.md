@@ -2,8 +2,11 @@
 
 本地优先的招聘邮件、求职待办与提醒助手，目标平台 Windows 10/11。
 
-当前版本 0.2.2：省略年份默认使用 2026（设置中每年可调整一次），明确日期时刻自动生成事件；事件建议、邮件和待办按事件时间升序。独立桌面窗口、日历、改期和备份功能继续保留。下一轮 P3 按已确认的本机正式版范围交付。
+当前开发版本 0.3.0：可选 AI、申请看板、多邮箱、手机/webhook、准备事项、ICS 已集成，正在完成打包与候选版验收。默认年仍为 2026，明确日期时间自动填入并形成待办，列表按事件时间升序。
 
+- [P3验收与发布准入](docs/p3-acceptance.md)
+- [使用帮助](docs/user-guide.md)
+- [隐私说明](docs/privacy.md)
 - [当前进度与下一步](docs/progress.md)
 - [P3 本机正式版交付计划](docs/p3-delivery-plan.md)
 - [版本变更记录](CHANGELOG.md)
@@ -17,7 +20,7 @@
 - [原始 PRD](OfferPilot_Documents_v1.0/docs/OfferPilot_PRD_v1.0.md)
 - [原始技术概要](OfferPilot_Documents_v1.0/docs/OfferPilot_Technical_Design_v1.0.md)
 
-原始文档保留在导入目录，新增设计和实施记录集中在根目录 docs/。历史设计中的“待确认”是原始评审状态，P0 授权以 [实施计划的确认记录](docs/superpowers/plans/2026-11-09-p0.md#approval) 为准。本轮增量以 [P1 事件管理设计](docs/superpowers/specs/2026-11-10-p1-events.md) 为准，其余 P1/P2 不在范围内。
+原始文档保留在导入目录，新增设计和实施记录集中在根目录 docs/。历史设计中的“待确认”是原始评审状态，P0 授权以 [实施计划的确认记录](docs/superpowers/plans/2026-11-09-p0.md#approval) 为准。本轮增量以 [P1 事件管理设计](docs/superpowers/specs/2026-11-10-p1-events.md) 为准，P3增量范围以用户确认的 [本机版计划](docs/p3-delivery-plan.md) 为准。
 
 ## 本机使用
 

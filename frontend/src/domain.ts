@@ -46,7 +46,7 @@ export function reviewTemporal(original:Temporal,form:TimeForm,kind:string):Temp
   reference_kind:(chosen?.reference_kind as string|undefined)??original.reference_kind,
   reference_at:(chosen?.reference_at as string|undefined)??original.reference_at};
 }
-const issueNames:Record<string,string>={TIMEZONE_UNCONFIRMED:'请核对事件时间',YEAR_OR_DATE_MISSING:'年份或日期需要确认',RELATIVE_TIME_REQUIRES_CONFIRMATION:'请选择时间依据',MULTIPLE_TIMES:'有多个时间，请选择本事件的时间',CHANGE_REQUIRES_REVIEW:'请关联需要改期或取消的原事件',TEXT_TRUNCATED:'正文已截断，请核对原邮件',COMPANY_MISSING:'公司未识别，可确认后保存',FORWARDED_MESSAGE:'转发邮件，请核对时间依据',DUPLICATE_CANDIDATE:'可能重复，请核对已有事件',REPARSE_DIFFERENCE:'重新识别得到更新，请核对',INVALID_TIME_RANGE:'时间区间无效，请手动修正'};
+const issueNames:Record<string,string>={AI_REQUIRES_REVIEW:'AI 建议，请核对原文后确认',TIMEZONE_UNCONFIRMED:'请核对事件时间',YEAR_OR_DATE_MISSING:'年份或日期需要确认',RELATIVE_TIME_REQUIRES_CONFIRMATION:'请选择时间依据',MULTIPLE_TIMES:'有多个时间，请选择本事件的时间',CHANGE_REQUIRES_REVIEW:'请关联需要改期或取消的原事件',TEXT_TRUNCATED:'正文已截断，请核对原邮件',COMPANY_MISSING:'公司未识别，可确认后保存',FORWARDED_MESSAGE:'转发邮件，请核对时间依据',DUPLICATE_CANDIDATE:'可能重复，请核对已有事件',REPARSE_DIFFERENCE:'重新识别得到更新，请核对',INVALID_TIME_RANGE:'时间区间无效，请手动修正'};
 export function issueText(code:string){return issueNames[code]??'请对照原文核对信息';}
 export function displayTime(value?:string|null){if(!value)return '未设置具体时刻';const d=new Date(value);if(!Number.isFinite(d.getTime()))return value;return new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:displayZone,hour12:false}).format(d);}
 export function taskGroup(task:{status:string;due_at?:string|null;starts_at?:string|null;due_date?:string|null},now=new Date()){

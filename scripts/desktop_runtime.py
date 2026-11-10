@@ -142,7 +142,7 @@ class DesktopWindow:
         require_webview2()
         self.webview.start(gui='edgechromium',private_mode=True,
             storage_path=str(Path(data_dir)/'runtime/webview'),
-            user_agent='OfferPilotDesktop/0.2.2',localization={
+            user_agent='OfferPilotDesktop/0.3.0',localization={
                 'global.quitConfirmation':'退出后将停止邮件同步与提醒。确定退出？',
                 'global.ok':'确定','global.cancel':'取消','global.saveFile':'保存文件',
                 'windows.fileFilter.allFiles':'所有文件'})

@@ -19,9 +19,9 @@ export function reminderChanges(draft:ReminderDraft){
  return {reminder_offsets_seconds:offsets,quiet_hours:{...q},notification_privacy:draft.privacy};
 }
 type Call=(path:string,method:'POST'|'PUT',body?:any)=>Promise<any>;
-export async function saveAndTestMailbox(state:{accountId:string},input:{address:string;code:string;initialScan:string},call:Call,wait:(id:string)=>Promise<any>){
+export async function saveAndTestMailbox(state:{accountId:string},input:{address:string;code:string;initialScan:string;provider?:string},call:Call,wait:(id:string)=>Promise<any>){
  if(state.accountId)await call(`/accounts/${state.accountId}/credential`,'PUT',{authorization_code:input.code});
- else {const account=await call('/accounts','POST',{provider:'qq',address:input.address.trim(),authorization_code:input.code,initial_scan:input.initialScan});state.accountId=account.id;}
+ else {const account=await call('/accounts','POST',{provider:input.provider??'qq',address:input.address.trim(),authorization_code:input.code,initial_scan:input.initialScan});state.accountId=account.id;}
  const job=await call(`/accounts/${state.accountId}/test`,'POST');
  if(job.job_id)await wait(job.job_id);
 }

@@ -270,6 +270,7 @@ class MailService:
     def __init__(self, db, tasks, settings, clock):
         self.db, self.tasks, self.settings, self.clock = db, tasks, settings, clock
         self.parse_lock = threading.Lock()
+        self.ai_enqueue = None
 
     def upgrade_year_defaults(self,checkpoint):
         """Upgrade untouched legacy suggestions only; user decisions remain authoritative."""
@@ -423,6 +424,8 @@ class MailService:
             audit(session, mail, "mail.parsed", {"candidates": len(drafts)})
             if mail.state == "review_needed":
                 self.db.log("parse.review_needed", module="parse", entity_id=message_id, count=len(drafts))
+        if self.ai_enqueue:
+            self.ai_enqueue(message_id)
 
     def cleanup(self):
         with self.db.tx() as session:

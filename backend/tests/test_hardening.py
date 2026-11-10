@@ -167,8 +167,8 @@ def test_manual_application_linking_is_persistent_and_versioned(client):
     task = client.post('/api/v1/tasks', json=body).json()["data"]
     assert task["application_id"] == application["id"]
     changed = client.patch('/api/v1/applications/' + application["id"],
-                           json={"expected_version": 1, "changes": {"position": "平台工程师"}})
-    assert changed.status_code == 200 and changed.json()["data"]["version"] == 2
+                           json={"expected_version": 2, "changes": {"position": "平台工程师"}})
+    assert changed.status_code == 200 and changed.json()["data"]["version"] == 3
     assert client.patch('/api/v1/applications/' + application["id"],
                         json={"expected_version": 1, "changes": {"stage": "offer"}}).status_code == 409
     assert len(client.get('/api/v1/applications').json()["data"]) == 1

@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException
 
 from app.accounts import AccountService, QQAdapter, WindowsCredentialStore
 from app.applications import ApplicationService
+from app.application_board import ApplicationBoardService
 from app.data_tools import DataTools
 from app.domain import AppError, iso, uid, utcnow
 from app.jobs import JobService
@@ -28,11 +29,16 @@ from app.persistence import Database, SCHEMA_REVISION
 from app.reminders import ReminderService, WindowsNotifier
 from app.security import Sessions, check_request, limit_request_body
 from app.tasks import SettingsService, TaskService
+from app.version import VERSION
+from app.integrations import IntegrationService
+from app.ai_worker import AIWorker
+from app.webhook import WebhookNotifier
+from app.preparation import PreparationService
 
 
 def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None, clock=None,
                notifier=None, mail_adapter=None, credential_store=None, start_workers=True,
-               autostart_callback=None, static_dir=None, shutdown_timeout=15):
+               autostart_callback=None, static_dir=None, shutdown_timeout=15, ai_parser=None, webhook_transport=None):
     clock = clock or utcnow
     data_dir = Path(data_dir).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +70,15 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
     jobs = JobService(db, clock)
     mail = MailService(db, tasks, settings, clock)
     vault = credential_store or WindowsCredentialStore()
+    integrations = IntegrationService(db, vault, clock)
+    webhook = WebhookNotifier(integrations, webhook_transport)
+    reminders.webhook = webhook.send
+    ai = AIWorker(db, settings, integrations, clock, ai_parser)
+    def integration_changed(kind, session):
+        ai.changed(kind, session)
+        tasks.integration_changed(kind, session)
+    integrations.on_change = integration_changed
+    mail.ai_enqueue = ai.enqueue
     accounts = AccountService(db, clock, vault, mail_adapter or QQAdapter(), mail, jobs, settings)
     data_tools = DataTools(db, clock, tasks, vault)
     jobs.handlers.update({
@@ -74,11 +89,12 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         "reparse": lambda p: mail.reparse(p["message_id"], p["expected_version"]),
     })
     stop, workers = threading.Event(), []
-    worker_health = {name: "stopped" for name in ("reminders", "mail", "parse", "maintenance", "backup")}
+    worker_health = {name: "stopped" for name in ("reminders", "mail", "parse", "ai", "maintenance", "backup")}
     diagnostics = Diagnostics(db, clock, data_tools, worker_health)
     jobs.handlers["diagnostic_export"] = lambda p: diagnostics.export()
 
     def housekeeping():
+        integrations.retry_cleanup()
         with db.activity():
             mail.cleanup()
             data_tools.cleanup()
@@ -103,6 +119,7 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         if start_workers:
             for name, callback, interval in (("reminders", reminders.run_once, 15), ("mail", accounts.tick, 30),
                 ("parse", mail.parse_pending, 2), ("maintenance", jobs.run_once, 1),
+                ("ai", ai.run_once, 2),
                 ("backup", housekeeping, 60)):
                 thread = threading.Thread(target=worker, args=(name, callback, interval), daemon=True,
                                           name="offerpilot-" + name)
@@ -111,6 +128,8 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         log("app.start", schema_revision=SCHEMA_REVISION)
         yield
         stop.set()
+        ai.stop()
+        reminders.stop()
         await asyncio.gather(*(asyncio.to_thread(thread.join, shutdown_timeout) for thread in workers))
         # A timed-out network adapter cannot write after the database has closed.
         db.close()
@@ -118,12 +137,14 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         handler.close()
         logger.removeHandler(handler)
 
-    app = FastAPI(title="OfferPilot", version="0.2.2", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="OfferPilot", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.data_dir, app.state.bootstrap_code, app.state.sessions = data_dir, sessions.initial_code, sessions
     app.state.services = SimpleNamespace(db=db, settings=settings, tasks=tasks, reminders=reminders, mail=mail,
                                         accounts=accounts, jobs=jobs, data_tools=data_tools, clock=clock,
                                         worker_health=worker_health, autostart_callback=autostart_callback,
-                                        applications=applications)
+                                        applications=applications, application_board=ApplicationBoardService(db, clock),
+                                        integrations=integrations, ai=ai, webhook=webhook,
+                                        preparations=PreparationService(db, clock, tasks))
     app.state.services.diagnostics = diagnostics
     app.state.services.events = EventService(db, tasks)
     app.state.origin = origin.rstrip("/")

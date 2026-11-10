@@ -9,13 +9,27 @@ from app.persistence import Database, SCHEMA_REVISION
 from test_core import task_body
 
 
+def downgrade_fixture(services, revision):
+    """Use the real migration chain so new tables never leak into old fixtures."""
+    from alembic import command
+    from sqlalchemy import create_engine
+    from app.backup_schema import config
+
+    services.db.engine.dispose()
+    engine = create_engine(f"sqlite:///{services.db.path.as_posix()}")
+    try:
+        cfg = config()
+        with engine.connect() as connection:
+            cfg.attributes['connection'] = connection
+            command.downgrade(cfg, revision)
+    finally:
+        engine.dispose()
+
+
 def old_database(path):
     s = create_app(path, start_workers=False).state.services
     task = s.tasks.create(task_body())
-    s.db.engine.dispose()
-    with closing(sqlite3.connect(str(s.db.path))) as connection:
-        connection.execute("UPDATE alembic_version SET version_num='0001_p0'")
-        connection.commit()
+    downgrade_fixture(s, "0001_p0")
     return s.db.path, task['id']
 
 
@@ -83,12 +97,9 @@ def test_newer_schema_is_refused_before_upgrade(tmp_path):
 def test_p0_live_upgrade_adds_event_details_without_changing_task_or_reminders(tmp_path):
     s=create_app(tmp_path,start_workers=False).state.services
     task=s.tasks.create(task_body())
-    s.db.engine.dispose()
+    downgrade_fixture(s, "0003_parse_cache")
     with closing(sqlite3.connect(s.db.path)) as connection:
         reminders=list(connection.execute('SELECT id,state,fire_at FROM reminders ORDER BY id'))
-        connection.execute('ALTER TABLE tasks DROP COLUMN event_details')
-        connection.execute("UPDATE alembic_version SET version_num='0003_parse_cache'")
-        connection.commit()
     upgraded=create_app(tmp_path,start_workers=False).state.services
     saved=upgraded.tasks.get(task['id'])
     assert saved['starts_at']==task['starts_at']

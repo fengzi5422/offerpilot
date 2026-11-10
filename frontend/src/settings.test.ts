@@ -1,6 +1,12 @@
 import {expect,it,vi} from 'vitest';
 import {reminderDraft,reminderChanges,saveAndTestMailbox} from './settings';
 
+it('preserves selected mailbox provider',async()=>{
+ const call=vi.fn().mockResolvedValueOnce({id:'163'}).mockResolvedValueOnce({job_id:'test'});
+ await saveAndTestMailbox({accountId:''},{address:'a@163.com',code:'test',initialScan:'14',provider:'163'} as any,call,vi.fn());
+ expect(call.mock.calls[0][2].provider).toBe('163');
+});
+
 it('converts reminder minutes and quiet hours to one settings patch',()=>{
  const draft=reminderDraft({reminder_offsets_seconds:{custom:[3600],interview:[86400,900]},quiet_hours:{enabled:false,start:'23:00',end:'08:00'},notification_privacy:'generic'});
  draft.offsets.custom='60, 10';draft.offsets.interview='';draft.quiet.enabled=true;

@@ -5,14 +5,16 @@ import json
 from uuid import UUID
 
 from fastapi import BackgroundTasks, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
 
 from app.data_tools import MAX_BACKUP_BYTES
 from app.domain import AppError, millis
+from app.icalendar import export_calendar
 from app.mail import MAX_EML_BYTES
-from app.persistence import Command
+from app.persistence import Command, Reminder, get_record
+from app.version import VERSION
 
 
 def install_routes(app):
@@ -69,7 +71,7 @@ def install_routes(app):
     @app.get("/health")
     @app.get("/api/v1/health")
     def health(request: Request):
-        return respond(request, {"ready": True, "version": "0.2.0"})
+        return respond(request, {"ready": True, "version": VERSION})
 
     @app.post("/api/v1/session/bootstrap")
     def bootstrap(request: Request, body: dict):
@@ -86,6 +88,28 @@ def install_routes(app):
     def list_tasks(request: Request, view: str | None = None, status: str | None = None):
         return page(request, s.tasks.list(view, status))
 
+    @app.get('/api/v1/integrations/{kind}')
+    def integration_settings(request: Request, kind: str):
+        return respond(request, {**s.integrations.get(kind), **({'runtime': s.ai.status()} if kind == 'ai' else {})})
+
+    @app.patch('/api/v1/integrations/{kind}')
+    def integration_update(request: Request, kind: str, body: dict):
+        # Secrets must never enter durable idempotency command receipts.
+        return respond(request, s.integrations.patch(kind, body.get('expected_version'), body.get('changes')))
+
+    @app.delete('/api/v1/integrations/{kind}')
+    def integration_delete(request: Request, kind: str, body: dict):
+        return respond(request, s.integrations.delete(kind, body.get('expected_version')))
+
+    @app.post('/api/v1/integrations/ai/test')
+    def ai_test(request: Request):
+        return respond(request, s.ai.test())
+
+    @app.post('/api/v1/integrations/webhook/test')
+    def webhook_test(request: Request):
+        from app.domain import uid
+        return respond(request, s.webhook({'idempotency_key': 'test:' + uid()}))
+
     @app.post("/api/v1/tasks")
     def create_task(request: Request, body: dict):
         return command(request, body, lambda: s.tasks.create(body), 201)
@@ -93,6 +117,15 @@ def install_routes(app):
     @app.get('/api/v1/calendar')
     def calendar(request: Request, start: str, end: str, timezone: str | None = None):
         return respond(request,s.events.calendar(start,end,timezone))
+
+    @app.get("/api/v1/calendar/export")
+    def calendar_export(request: Request, include_details: bool = False):
+        with db.activity():
+            content, omitted = export_calendar(s.tasks.list(), clock(), include_details=include_details)
+        return Response(content, media_type="text/calendar; charset=utf-8", headers={
+            "Content-Disposition": 'attachment; filename="offerpilot-calendar.ics"',
+            "X-OfferPilot-Omitted-Count": str(omitted),
+        })
 
     @app.get("/api/v1/tasks/{task_id}")
     def get_task(request: Request, task_id: str):
@@ -102,11 +135,39 @@ def install_routes(app):
     def patch_task(request: Request, task_id: str, body: dict):
         return respond(request, s.tasks.patch(task_id, body.get("expected_version"), body.get("changes")))
 
+    @app.get('/api/v1/tasks/{task_id}/preparations')
+    def preparations(request: Request, task_id: str):
+        return respond(request, s.preparations.list(task_id))
+
+    @app.post('/api/v1/tasks/{task_id}/preparations')
+    def preparation_create(request: Request, task_id: str, body: dict):
+        value = {k: v for k, v in body.items() if k != 'expected_parent_version'}
+        with s.preparations.lock(task_id):
+            return command(request, body, lambda: s.preparations.create(task_id, body.get('expected_parent_version'), value), 201)
+
+    @app.post('/api/v1/tasks/{task_id}/preparations/templates')
+    def preparation_template(request: Request, task_id: str, body: dict):
+        with s.preparations.lock(task_id):
+            return command(request, body, lambda: s.preparations.apply_template(task_id, body.get('expected_parent_version')))
+
+    @app.patch('/api/v1/tasks/{task_id}/preparations/{preparation_id}')
+    def preparation_patch(request: Request, task_id: str, preparation_id: str, body: dict):
+        with s.preparations.lock(task_id, preparation_id):
+            return command(request, body, lambda: s.preparations.patch(task_id, preparation_id,
+                body.get('expected_parent_version'), body.get('expected_version'), body.get('changes')))
+
+    @app.delete('/api/v1/tasks/{task_id}/preparations/{preparation_id}')
+    def preparation_delete(request: Request, task_id: str, preparation_id: str, body: dict):
+        with s.preparations.lock(task_id, preparation_id):
+            return command(request, body, lambda: s.preparations.delete(task_id, preparation_id,
+                body.get('expected_parent_version'), body.get('expected_version')))
+
     @app.post("/api/v1/tasks/{task_id}/{action}")
     def task_action(request: Request, task_id: str, action: str, body: dict):
         if action not in ("complete", "cancel", "reopen"):
             raise AppError("NOT_FOUND", "操作不存在", 404)
-        return command(request, body, lambda: s.tasks.transition(task_id, body.get("expected_version"), action))
+        with db.activity(), db.task_lock(task_id):
+            return command(request, body, lambda: s.tasks.transition(task_id, body.get("expected_version"), action))
 
     @app.get("/api/v1/emails")
     def list_emails(request: Request, state: str | None = None, account_id: str | None = None):
@@ -135,6 +196,8 @@ def install_routes(app):
 
     @app.post("/api/v1/emails/{message_id}/reparse")
     def reparse(request: Request, message_id: str, body: dict):
+        if body.get('mode') == 'ai':
+            return command(request, body, lambda: {'job_id': s.ai.enqueue(message_id, body.get('expected_version'), force=True)}, 202)
         if body.get("mode", "rules") != "rules":
             raise AppError("FEATURE_UNAVAILABLE", "当前版本仅支持规则解析", 400)
         return command(request, body, lambda: {"job_id": s.jobs.enqueue("reparse", {
@@ -205,7 +268,10 @@ def install_routes(app):
 
     @app.post("/api/v1/reminders/{reminder_id}/snooze")
     def snooze(request: Request, reminder_id: str, body: dict):
-        return command(request, body, lambda: s.reminders.snooze(reminder_id, body.get("expected_version"), body.get("minutes")))
+        with db.read() as session:
+            task_id = get_record(session, Reminder, reminder_id).task_id
+        with db.activity(), db.task_lock(task_id):
+            return command(request, body, lambda: s.reminders.snooze(reminder_id, body.get("expected_version"), body.get("minutes")))
 
     @app.get("/api/v1/settings")
     def get_settings(request: Request):
@@ -278,6 +344,29 @@ def install_routes(app):
     @app.post("/api/v1/applications")
     def create_application(request: Request, body: dict):
         return command(request, body, lambda: s.applications.create(body), 201)
+
+    @app.get("/api/v1/applications/{application_id}")
+    def get_application(request: Request, application_id: str):
+        return respond(request, s.applications.get(application_id))
+
+    @app.post("/api/v1/applications/{application_id}/link")
+    def link_application_task(request: Request, application_id: str, body: dict):
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise AppError("VALIDATION_ERROR", "请选择需要关联的任务", 422)
+        with db.activity(), db.task_lock(task_id):
+            return command(request, body, lambda: s.application_board.link(
+                application_id, body.get("expected_version"), task_id,
+                body.get("expected_task_version"), body.get("expected_source_version")))
+
+    @app.post("/api/v1/applications/{application_id}/unlink")
+    def unlink_application_task(request: Request, application_id: str, body: dict):
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise AppError("VALIDATION_ERROR", "请选择需要解除关联的任务", 422)
+        with db.activity(), db.task_lock(task_id):
+            return command(request, body, lambda: s.application_board.unlink(
+                application_id, body.get("expected_version"), task_id, body.get("expected_task_version")))
 
     @app.patch("/api/v1/applications/{application_id}")
     def patch_application(request: Request, application_id: str, body: dict):

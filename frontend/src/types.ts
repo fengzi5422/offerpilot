@@ -2,8 +2,10 @@ export interface Temporal { kind: 'absolute'|'date_only'|'relative'|'unknown'; r
 export interface Task { id:string; title:string; kind:string; status:string; priority:number; version:number; temporal:Temporal; due_at?:string|null; starts_at?:string|null; due_date?:string|null; notes?:string; next_reminder_at?:string|null; source?:Record<string,unknown>; reminders?:Record<string,unknown>[] }
 export interface Candidate { state?:string; candidate_id:string; title:string; kind:string; priority:number; temporal:Temporal; evidence?:unknown; issues?:unknown }
 export interface Mail { event_at?:string|null; event_date?:string|null; id:string; subject:string; from_addr:string; state:string; version:number; created_at?:string; first_seen_at?:string; header_date?:string; internal_date?:string; text_excerpt?:string; links?:{url:string;domain:string;text?:string}[]; candidates?:Candidate[]; evidence?:unknown; issues?:unknown }
-export interface Account { id:string; address:string; state:string; version:number; last_sync_at?:string; next_sync_at?:string; last_error_code?:string }
+export interface Account { id:string; provider:'qq'|'163'|'126'; address:string; state:string; version:number; last_sync_at?:string; next_sync_at?:string; last_error_code?:string }
 export interface Notice { id:string; title?:string; kind?:string; state?:string; summary_json?:unknown; created_at:string; version:number; dismissed_at?:string }
 export interface EventDetails {location:string;meeting_url:string}
 export interface Task {event_details?:EventDetails;ends_at?:string|null;confirmed?:boolean}
 export interface Candidate {event_details?:EventDetails;task_id?:string|null}
+export interface Candidate {parser_source?:string}
+export interface Mail {classification?:{ai_status?:string;ai_error_code?:string;[key:string]:unknown}}

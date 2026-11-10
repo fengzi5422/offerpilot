@@ -7,6 +7,13 @@ import pytest
 
 sys.path.insert(0,str(Path(__file__).parent))
 from archive_release import archive_release, digest
+from release_version import versions
+
+
+def test_source_versions_are_consistent():
+    from packaging.version import Version
+    values = versions(Path(__file__).resolve().parents[1])
+    assert len({Version(value) for value in values.values()}) == 1, values
 
 
 def test_archived_release_is_complete_and_never_overwritten(tmp_path):

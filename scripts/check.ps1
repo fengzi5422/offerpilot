@@ -6,8 +6,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Push-Location frontend
 try {
-    & npm test
+    & npm.cmd test
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & npm run build
+    & npm.cmd run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally { Pop-Location }

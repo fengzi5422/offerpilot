@@ -1,6 +1,6 @@
 [project]
 name = "offerpilot"
-version = "0.2.2"
+version = "0.3.0"
 description = "Local-first recruitment task assistant"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -26,6 +26,7 @@ dev = [
     "ruff>=0.9,<1",
     "pyinstaller>=6,<7",
     "websocket-client>=1.8,<2",
+    "icalendar>=6,<8",
 ]
 
 [tool.pytest.ini_options]

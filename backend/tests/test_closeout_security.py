@@ -21,6 +21,7 @@ def old_backup(services, *, trigger=False, revision='0002_applications'):
     staged=services.db.directory/'old-copy.sqlite'
     staged.write_bytes(database)
     with closing(sqlite3.connect(staged)) as connection:
+        connection.execute('DROP TABLE preparations')
         if revision=='0002_applications':
             connection.execute('DROP TABLE mail_parse_cache')
         connection.execute('ALTER TABLE tasks DROP COLUMN event_details')
@@ -106,7 +107,7 @@ def test_previous_p0_model_created_schema_with_different_column_order_is_accepte
     engine=create_engine(f'sqlite:///{path.as_posix()}')
     # Previous P0's first migration used create_all: application_id came first,
     # whereas the frozen historical migration adds it at the end.
-    Base.metadata.create_all(engine,tables=[t for t in Base.metadata.sorted_tables if t.name!='mail_parse_cache'])
+    Base.metadata.create_all(engine,tables=[t for t in Base.metadata.sorted_tables if t.name not in ('mail_parse_cache', 'preparations')])
     with engine.begin() as connection:
         connection.exec_driver_sql('ALTER TABLE tasks DROP COLUMN event_details')
         connection.exec_driver_sql('CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)')

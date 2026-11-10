@@ -12,7 +12,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.domain import AppError, millis, uid, utcnow
 
-SCHEMA_REVISION = "0004_event_details"
+SCHEMA_REVISION = "0005_preparations"
+SUPPORTED_REVISIONS = ('0001_p0', '0002_applications', '0003_parse_cache', '0004_event_details', '0005_preparations')
 
 
 class Base(DeclarativeBase):
@@ -47,6 +48,20 @@ class Task(Record, Base):
     schedule_revision: Mapped[int] = mapped_column(Integer, default=1)
     __table_args__ = (CheckConstraint("version >= 1"), CheckConstraint("status IN ('pending','in_progress','done','cancelled')"),
                      CheckConstraint("priority IN (1,2,3)"))
+
+
+class Preparation(Record, Base):
+    __tablename__ = "preparations"
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    text: Mapped[str] = mapped_column(String(200))
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    remind_at: Mapped[int | None] = mapped_column(Integer)
+    reminder_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+    template_key: Mapped[str | None] = mapped_column(String)
+    parent_schedule_revision: Mapped[int] = mapped_column(Integer)
+    __table_args__ = (CheckConstraint("version >= 1"),
+                     Index("uq_preparation_template", "task_id", "template_key", unique=True))
 
 
 class Reminder(Record, Base):
@@ -213,6 +228,7 @@ class Database:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "data.sqlite"
         self.write_lock = threading.RLock()
+        self.outbound_gate = threading.RLock()
         self.local = threading.local()
         self.activity_condition = threading.Condition()
         self.active_operations = 0
@@ -244,7 +260,7 @@ class Database:
             with closing(sqlite3.connect(str(self.path))) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 revisions = list(connection.execute("SELECT version_num FROM alembic_version")) if "alembic_version" in tables else []
-                if tables and (len(revisions) != 1 or revisions[0][0] not in ("0001_p0", "0002_applications", "0003_parse_cache", SCHEMA_REVISION)):
+                if tables and (len(revisions) != 1 or revisions[0][0] not in SUPPORTED_REVISIONS):
                     raise AppError("DATABASE_VERSION_UNSUPPORTED", "数据库版本不兼容，请使用对应版本或保留备份后恢复", 503)
                 previous = revisions[0][0] if revisions else None
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -306,7 +322,7 @@ class Database:
             return self.task_locks.setdefault(task_id, threading.RLock())
 
     def close(self):
-        with self.write_lock:
+        with self.outbound_gate, self.write_lock:
             self.closed = True
             self.engine.dispose()
 
@@ -330,15 +346,24 @@ class Database:
 
     @contextmanager
     def activity(self):
+        if getattr(self.local, 'activity_depth', 0):
+            self.local.activity_depth += 1
+            try:
+                yield
+            finally:
+                self.local.activity_depth -= 1
+            return
         with self.activity_condition:
             while self.maintenance_active:
                 self.activity_condition.wait()
             self.active_operations += 1
+            self.local.activity_depth = 1
         try:
             yield
         finally:
             with self.activity_condition:
                 self.active_operations -= 1
+                self.local.activity_depth = 0
                 self.activity_condition.notify_all()
 
     @contextmanager
@@ -350,7 +375,7 @@ class Database:
             while self.active_operations:
                 self.activity_condition.wait()
         try:
-            with self.write_lock:
+            with self.outbound_gate, self.write_lock:
                 yield
         finally:
             with self.activity_condition:
@@ -370,13 +395,31 @@ class Database:
             try:
                 yield session
                 session.commit()
-                for event in session.info.pop("events", []):
-                    self.log(event["event"], module=event["module"], entity_id=event["entity_id"])
             except Exception:
                 session.rollback()
+                for callback in session.info.pop('rollback_callbacks', []):
+                    try:
+                        callback()
+                    except Exception:
+                        self.safe_log('credential.cleanup_failed', module='maintenance')
                 raise
             finally:
                 self.local.session = None
+            for event in session.info.pop("events", []):
+                self.safe_log(event["event"], module=event["module"], entity_id=event["entity_id"])
+            # Only the outermost transaction performs irreversible credential cleanup.
+            for callback in session.info.pop('commit_callbacks', []):
+                try:
+                    callback()
+                except Exception:
+                    self.safe_log('credential.cleanup_failed', module='maintenance')
+
+    def safe_log(self, *args, **kwargs):
+        try:
+            self.log(*args, **kwargs)
+        except Exception:
+            # Logging cannot undo a committed transaction or delete its credentials.
+            pass
 
 
 def get_record(session, cls, record_id):

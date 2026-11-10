@@ -8,7 +8,8 @@ from collections import Counter, deque
 from sqlalchemy import func, select
 
 from app.domain import iso
-from app.persistence import Account, Candidate, Email, Job, SCHEMA_REVISION, Task
+from app.persistence import Account, Candidate, Email, Job, SCHEMA_REVISION, Setting, Task
+from app.version import VERSION
 
 EVENTS = {'app.start','app.stop','app.recovery','db.migration','api.request','api.error','worker.failed',
           'mail.sync.start','mail.sync.complete','mail.sync.fail','mail.parsed','mail.ignored','mail.reviewed',
@@ -59,9 +60,12 @@ class Diagnostics:
                     (('tasks',Task),('emails',Email),('reviews',Candidate),('jobs',Job))}
             known={'ready','syncing','paused','auth_required','network_error','removed'}
             states=dict(Counter(state if state in known else 'unknown' for state in session.scalars(select(Account.state))))
-        return {'version':'0.2.2','schema_revision':SCHEMA_REVISION,'ready':True,
+            from app.integrations import CONSENT_VERSION
+            ai = session.get(Setting, 'integration:ai')
+            ai_enabled = bool(ai and ai.value.get('enabled') and ai.value.get('consent_version') == CONSENT_VERSION)
+        return {'version':VERSION,'schema_revision':SCHEMA_REVISION,'ready':True,
                 'workers':dict(self.worker_health),'database':{'status':'ready','journal_mode':'wal'},
-                'counts':counts,'account_states':states,'notification_channel':'windows','ai_enabled':False}
+                'counts':counts,'account_states':states,'notification_channel':'windows','ai_enabled':ai_enabled}
 
     def export(self):
         records=deque(maxlen=2000)
