@@ -4,3 +4,6 @@ export interface Candidate { state?:string; candidate_id:string; title:string; k
 export interface Mail { id:string; subject:string; from_addr:string; state:string; version:number; created_at?:string; first_seen_at?:string; header_date?:string; internal_date?:string; text_excerpt?:string; links?:{url:string;domain:string;text?:string}[]; candidates?:Candidate[]; evidence?:unknown; issues?:unknown }
 export interface Account { id:string; address:string; state:string; version:number; last_sync_at?:string; next_sync_at?:string; last_error_code?:string }
 export interface Notice { id:string; title?:string; kind?:string; state?:string; summary_json?:unknown; created_at:string; version:number; dismissed_at?:string }
+export interface EventDetails {location:string;meeting_url:string}
+export interface Task {event_details?:EventDetails;ends_at?:string|null;confirmed?:boolean}
+export interface Candidate {event_details?:EventDetails;task_id?:string|null}

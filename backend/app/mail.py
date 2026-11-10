@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import select
 
 from app.domain import AppError, Temporal, iso, millis, validated
+from app.event_parser import action_blocks
 from app.persistence import Candidate, Email, MailCache, Occurrence, audit, check_version, get_record
 
 MAX_EML_BYTES = 10 * 1024 * 1024
@@ -97,13 +98,41 @@ TIME_RE = re.compile(r"(?P<hour>\d{1,2})(?::|：|点)(?P<minute>\d{1,2})?分?")
 
 
 def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=None, internal_date=None):
+    original_text=text
+    # Evidence retains the complete block; incidental clocks in addresses, URLs
+    # and UTC offsets must not become competing event times.
+    text=re.sub(r'(?m)^\s*(?:(?:面试|笔试|测评)\s*)?(?:地点|地址|会议链接|会议地址|线上链接)\s*[:：][^\n]*', '', text)
+    text=re.sub(r'https?://[^\s<>]+', '', text)
     zone = "Asia/Shanghai" if re.search(r"北京时间|中国标准时间|Asia/Shanghai|UTC\+0?8(?::00)?|\+08:00", text) else None
     if re.search(r"\bUTC\b(?!\+)|\bGMT\b(?!\+)|\bZ\b", text):
         zone = "UTC"
-    value = {"kind": "unknown", "raw_text": text[:4096], "timezone": zone or default_timezone,
+    value = {"kind": "unknown", "raw_text": original_text[:4096], "timezone": zone or default_timezone,
              "timezone_source": "explicit" if zone else "account_default", "precision": "unknown",
              "needs_confirmation": True, "reason_codes": []}
+    text=re.sub(r'(?:UTC|GMT)\+0?8(?::00)?|\+08:00', '', text)
     dates, times = list(DATE_RE.finditer(text)), list(TIME_RE.finditer(text))
+    if len(dates)==1 and len(times)==2 and re.fullmatch(r'\s*[-—–~～至到]\s*', text[times[0].end():times[1].start()]):
+        if kind not in ('interview','written_exam'):
+            value['reason_codes']=['MULTIPLE_TIMES']
+            return Temporal.model_validate(value).public()
+        start_text=text[:times[1].start()]+text[times[1].end():]
+        result=parse_temporal(start_text,kind,default_timezone,header_date,internal_date)
+        if result.get('starts_at'):
+            try:
+                start=datetime.fromisoformat(result['starts_at']).astimezone(ZoneInfo(result['timezone']))
+                end_hour=int(times[1]['hour'])
+                if re.search(r'下午|晚上',text) and end_hour<12:
+                    end_hour+=12
+                end=start.replace(hour=end_hour,minute=int(times[1]['minute'] or 0))
+                if (end.astimezone(timezone.utc).astimezone(end.tzinfo).replace(tzinfo=None)!=end.replace(tzinfo=None)
+                        or end.replace(fold=0).utcoffset()!=end.replace(fold=1).utcoffset()):
+                    raise ValueError()
+                result['ends_at']=iso(end)
+                result['raw_text']=original_text[:4096]
+                return Temporal.model_validate(result).public()
+            except (ValueError,OverflowError):
+                value['reason_codes']=['INVALID_TIME_RANGE']
+        return Temporal.model_validate(value).public()
     if len(dates) > 1 or len(times) > 1:
         value["reason_codes"] = ["MULTIPLE_TIMES"]
     elif dates:
@@ -146,13 +175,21 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
                                                     "due_at": iso(anchor + timedelta(hours=int(hours[1])))})
                     except (ValueError, OverflowError):
                         continue
-        elif header_date and re.search(r"明天|后天", text):
+        elif header_date and re.search(r"明天|后天|(?:本周|下周)[一二三四五六日天]", text):
             reference = datetime.fromisoformat(header_date).astimezone(ZoneInfo(zone or default_timezone))
-            day = reference.date() + timedelta(days=2 if "后天" in text else 1)
+            weekday=re.search(r'(本周|下周)([一二三四五六日天])', text)
+            if weekday:
+                target='一二三四五六日'.index(weekday[2].replace('天','日'))
+                day=reference.date()+timedelta(days=target-reference.weekday()+(7 if weekday[1]=='下周' else 0))
+            else:
+                day = reference.date() + timedelta(days=2 if "后天" in text else 1)
             candidate = {"reference_kind": "message_date", "reference_at": header_date, "local_date": str(day)}
             if len(times) == 1:
                 try:
-                    local = datetime.combine(day, reference.time()).replace(hour=int(times[0]["hour"]),
+                    hour=int(times[0]['hour'])
+                    if re.search(r'下午|晚上',text) and hour<12:
+                        hour+=12
+                    local = datetime.combine(day, reference.time()).replace(hour=hour,
                              minute=int(times[0]["minute"] or 0), second=0, microsecond=0, tzinfo=reference.tzinfo)
                     candidate["starts_at" if kind in ("interview", "written_exam") else "due_at"] = iso(local)
                 except ValueError:
@@ -167,8 +204,16 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
             for year in (reference.year, reference.year + 1):
                 try:
                     day = datetime(year, int(partial[1]), int(partial[2])).date()
-                    candidates.append({"reference_kind": "message_date", "reference_at": header_date,
-                                       "local_date": str(day), "reason": "年份需要确认"})
+                    candidate={"reference_kind": "message_date", "reference_at": header_date,
+                               "local_date": str(day), "reason": "年份需要确认"}
+                    if len(times)==1:
+                        hour=int(times[0]['hour'])
+                        if re.search(r'下午|晚上',text) and hour<12:
+                            hour+=12
+                        local=datetime(year,int(partial[1]),int(partial[2]),hour,
+                            int(times[0]['minute'] or 0),tzinfo=ZoneInfo(zone or default_timezone))
+                        candidate['starts_at' if kind in ('interview','written_exam') else 'due_at']=iso(local)
+                    candidates.append(candidate)
                 except ValueError:
                     continue
             value["candidates"] = candidates
@@ -183,23 +228,11 @@ def classify_and_parse(mail, default_timezone):
     company_match = re.search(r"([\w\u4e00-\u9fff]{2,30}(?:科技|公司|集团|银行|大学))", subject + " " + text)
     company = company_match.group(1) if company_match else None
     candidates = []
-    for match in re.finditer(r"[^\n。；;，]+", text):
-        segment = match.group().strip()
+    for block in action_blocks(text):
+        segment = block['text']
         if not segment:
             continue
-        kind = None
-        if re.search(r"回复|确认.*出席|确认.*参加|确认.*意向|reply|confirm.*attend", segment, re.I):
-            kind = "reply"
-        elif re.search(r"上传|提交.*材料|提供.*材料|补充.*材料|成绩单|upload", segment, re.I):
-            kind = "materials"
-        elif re.search(r"测评|测验|assessment", segment, re.I):
-            kind = "assessment"
-        elif re.search(r"笔试|written.exam", segment, re.I):
-            kind = "written_exam"
-        elif re.search(r"面试|interview", segment, re.I):
-            kind = "interview"
-        elif re.search(r"接受.*offer|签署.*offer|接受.*录用|offer.*accept", segment, re.I):
-            kind = "offer"
+        kind = block['kind']
         if not kind:
             continue
         # Bare salutations/subject repeats are not independent actions.
@@ -215,12 +248,12 @@ def classify_and_parse(mail, default_timezone):
             issues.append("TEXT_TRUNCATED")
         if not company:
             issues.append("COMPANY_MISSING")
-        start = match.start() + len(match.group()) - len(match.group().lstrip())
+        start = block['start']
         labels = {"reply": "回复确认", "materials": "提交材料", "assessment": "完成测评",
                   "written_exam": "参加笔试", "interview": "参加面试", "offer": "处理录用通知"}
         candidates.append({"title": ((company + " · ") if company else "") + labels[kind], "kind": kind,
                            "priority": 2, "temporal": temporal, "issues": issues,
-                           "company": company, "evidence": [{"message_id": mail.id, "text_hash": mail.text_hash,
+                           "company": company, "event_details": block['event_details'], "evidence": [{"message_id": mail.id, "text_hash": mail.text_hash,
                            "segment_id": str(start), "start": start, "end": start + len(segment),
                            "quote": segment, "field": "action"}]})
         if len(candidates) == 30:
@@ -229,7 +262,7 @@ def classify_and_parse(mail, default_timezone):
         candidates.append({"title": "审核招聘安排变更", "kind": "custom", "priority": 2,
                            "temporal": Temporal().public(), "issues": ["CHANGE_REQUIRES_REVIEW"], "evidence": []})
     classification = {"relevance": "recruitment" if candidates else "uncertain",
-                      "categories": sorted({c["kind"] for c in candidates}), "rule_version": "rules-v1"}
+                      "categories": sorted({c["kind"] for c in candidates}), "rule_version": "rules-v2"}
     if not candidates and re.search(r"已收到.*申请|申请.*收到|application.*received|感谢.*投递", combined, re.I):
         classification.update(relevance="recruitment", categories=["application_received"])
     elif not candidates and re.search(r"促销|优惠券|退订|sale|unsubscribe", combined, re.I):
@@ -337,7 +370,7 @@ class MailService:
                 session.add(candidate)
                 session.flush()
                 if not draft["issues"] and not draft["temporal"]["needs_confirmation"]:
-                    task = self.tasks.create({key: draft[key] for key in ("title", "kind", "priority", "temporal")},
+                    task = self.tasks.create({key: draft[key] for key in ("title", "kind", "priority", "temporal", "event_details")},
                         session=session, source={"message_id": mail.id, "subject": mail.subject,
                         "evidence": draft["evidence"]}, action_key=candidate.action_key)
                     candidate.state, candidate.task_id = "accepted", task["id"]
@@ -427,6 +460,7 @@ class MailService:
                 if "CHANGE_REQUIRES_REVIEW" in candidate.candidate["issues"]:
                     raise AppError("MANUAL_RESCHEDULE_REQUIRED", "变更邮件请先手动修改原任务，再忽略此审核项", 409)
                 value = {key: candidate.candidate[key] for key in ("title", "kind", "priority", "temporal")}
+                value['event_details'] = candidate.candidate.get('event_details', {})
                 if decision.get("application_id"):
                     value["application_id"] = decision["application_id"]
                 if action == "edit":
@@ -466,18 +500,40 @@ class MailService:
                 mail.state = "new"
                 mail.version += 1
                 return {"message_id": mail.id}
-            if mail.classification.get("rule_version") == "rules-v1":
+            if mail.classification.get("rule_version") == "rules-v2":
                 return {"message_id": mail.id, "unchanged": True, "source_is_excerpt": True}
             # Rules are versioned. Existing accepted actions and user fields are immutable to reparse.
             classification, drafts = classify_and_parse(mail, self.settings.get(session)["timezone"])
             mail.classification = classification
             existing = list(session.scalars(select(Candidate).where(Candidate.message_id == mail.id)))
-            existing_keys = {c.action_key for c in existing}
+            by_key = {c.action_key:c for c in existing}
+            # Replace stale open suggestions only. Accepted/ignored decisions and
+            # task fields are preserved. A changed segmentation cannot authorize
+            # creating a second task for a previously accepted source action.
+            for candidate in existing:
+                if candidate.state=='open':
+                    candidate.state='superseded'
             for draft in drafts:
                 action_key = mail.id + ":" + hashlib.sha256((draft["kind"] + repr(draft["evidence"])).encode()).hexdigest()
-                if action_key not in existing_keys:
-                    draft["issues"].append("REPARSE_DIFFERENCE")
+                prior=by_key.get(action_key)
+                if prior and prior.state in ('accepted','ignored'):
+                    continue
+                if any(c.state=='ignored' and c.candidate['kind']==draft['kind'] and
+                       any(isinstance(old.get('start'),int) and isinstance(old.get('end'),int) and
+                           isinstance(new.get('start'),int) and isinstance(new.get('end'),int) and
+                           old['start']<new['end'] and new['start']<old['end']
+                           for old in c.candidate.get('evidence',[]) for new in draft.get('evidence',[]))
+                       for c in existing):
+                    continue
+                draft['issues'].append('REPARSE_DIFFERENCE')
+                if any(c.state=='accepted' and c.candidate['kind']==draft['kind'] for c in existing):
+                    draft['issues'].append('CHANGE_REQUIRES_REVIEW')
+                if prior:
+                    prior.candidate,prior.state=draft,'open'
+                else:
                     session.add(Candidate(message_id=mail.id, candidate=draft, action_key=action_key))
-                    mail.state = "review_needed"
+            session.flush()
+            mail.state='review_needed' if session.scalar(select(Candidate.id).where(
+                Candidate.message_id==mail.id,Candidate.state=='open')) else 'parsed'
             mail.version += 1
             return {"message_id": mail.id}

@@ -11,7 +11,7 @@ from app.main import create_app
 from test_core import task_body
 
 
-def old_backup(services, *, trigger=False):
+def old_backup(services, *, trigger=False, revision='0002_applications'):
     from app.data_tools import digest
     artifact=services.data_tools.backup()
     path,_=services.data_tools.artifact(artifact['artifact_id'])
@@ -21,14 +21,16 @@ def old_backup(services, *, trigger=False):
     staged=services.db.directory/'old-copy.sqlite'
     staged.write_bytes(database)
     with closing(sqlite3.connect(staged)) as connection:
-        connection.execute('DROP TABLE mail_parse_cache')
-        connection.execute("UPDATE alembic_version SET version_num='0002_applications'")
+        if revision=='0002_applications':
+            connection.execute('DROP TABLE mail_parse_cache')
+        connection.execute('ALTER TABLE tasks DROP COLUMN event_details')
+        connection.execute('UPDATE alembic_version SET version_num=?',(revision,))
         if trigger:
             connection.execute('CREATE TRIGGER untrusted AFTER INSERT ON tasks BEGIN DELETE FROM tasks; END')
         connection.commit()
     database=staged.read_bytes()
     staged.unlink()
-    manifest['schema_revision']='0002_applications'
+    manifest['schema_revision']=revision
     manifest['files']=[{'name':'data.sqlite','size':len(database),'sha256':digest(database)}]
     output=io.BytesIO()
     with zipfile.ZipFile(output,'w') as archive:
@@ -47,6 +49,18 @@ def test_known_older_backup_upgrades_only_the_isolated_copy(tmp_path):
     assert services.tasks.get(task['id'])['title']==task['title']
     services.data_tools.apply_restore(validated['restore_id'],preview['confirmation_token'])
     assert services.tasks.get(task['id'])['title']==task['title']
+
+
+def test_p0_closeout_backup_upgrades_and_retains_stable_task_time(tmp_path):
+    services=create_app(tmp_path,start_workers=False).state.services
+    task=services.tasks.create(task_body())
+    validated=services.data_tools.validate_restore(old_backup(services,revision='0003_parse_cache'))
+    preview=services.data_tools.restore_preview(validated['restore_id'])
+    assert preview['migrated_from']=='0003_parse_cache'
+    services.data_tools.apply_restore(validated['restore_id'],preview['confirmation_token'])
+    saved=services.tasks.get(task['id'])
+    assert saved['starts_at']==task['starts_at']
+    assert saved['event_details']=={'location':'','meeting_url':''}
 
 
 def test_genuine_v1_backup_without_application_columns_can_migrate(tmp_path):
@@ -94,6 +108,7 @@ def test_previous_p0_model_created_schema_with_different_column_order_is_accepte
     # whereas the frozen historical migration adds it at the end.
     Base.metadata.create_all(engine,tables=[t for t in Base.metadata.sorted_tables if t.name!='mail_parse_cache'])
     with engine.begin() as connection:
+        connection.exec_driver_sql('ALTER TABLE tasks DROP COLUMN event_details')
         connection.exec_driver_sql('CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)')
         connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0002_applications')")
     engine.dispose()

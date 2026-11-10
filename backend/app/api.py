@@ -69,7 +69,7 @@ def install_routes(app):
     @app.get("/health")
     @app.get("/api/v1/health")
     def health(request: Request):
-        return respond(request, {"ready": True, "version": "0.1.0"})
+        return respond(request, {"ready": True, "version": "0.2.0"})
 
     @app.post("/api/v1/session/bootstrap")
     def bootstrap(request: Request, body: dict):
@@ -89,6 +89,10 @@ def install_routes(app):
     @app.post("/api/v1/tasks")
     def create_task(request: Request, body: dict):
         return command(request, body, lambda: s.tasks.create(body), 201)
+
+    @app.get('/api/v1/calendar')
+    def calendar(request: Request, start: str, end: str, timezone: str | None = None):
+        return respond(request,s.events.calendar(start,end,timezone))
 
     @app.get("/api/v1/tasks/{task_id}")
     def get_task(request: Request, task_id: str):
@@ -135,6 +139,16 @@ def install_routes(app):
             raise AppError("FEATURE_UNAVAILABLE", "当前版本仅支持规则解析", 400)
         return command(request, body, lambda: {"job_id": s.jobs.enqueue("reparse", {
             "message_id": message_id, "expected_version": body.get("expected_version")})}, 202)
+
+    @app.post('/api/v1/emails/{message_id}/resolve-change')
+    def resolve_change(request: Request, message_id: str, body: dict):
+        task_id=body.get('task_id')
+        if not isinstance(task_id,str) or not task_id:
+            raise AppError('VALIDATION_ERROR','请选择需要处理的原事件',422)
+        # Same lock order as deliveries: activity -> task -> database. The
+        # command receipt, review state and reminder changes commit together.
+        with db.activity(), db.task_lock(task_id):
+            return command(request,body,lambda:s.events.resolve_change(message_id,body))
 
     @app.get("/api/v1/accounts")
     def list_accounts(request: Request):

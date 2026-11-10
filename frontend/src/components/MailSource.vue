@@ -10,6 +10,7 @@ const unavailable=ref(Boolean(props.source.source_unavailable));
 const quotes=computed(()=>Array.isArray(props.source.evidence)?props.source.evidence
  .filter((e):e is {quote:string}=>Boolean(e&&typeof e==='object'&&typeof e.quote==='string'))
  .map(e=>e.quote):[]);
+const changes=computed(()=>Array.isArray(props.source.changes)?props.source.changes.filter((c):c is {subject:string;action:string;evidence?:{quote:string}[]}=>Boolean(c&&typeof c==='object'&&typeof c.subject==='string'&&typeof c.action==='string')):[]);
 const links=computed(()=>(mail.value?.links??[]).flatMap(link=>{
  try{const url=new URL(link.url);return ['http:','https:'].includes(url.protocol)
   ?[{url:url.href,domain:url.hostname,text:link.text||url.hostname}]:[];}catch{return [];}
@@ -30,6 +31,7 @@ onMounted(async()=>{
    <dt v-if="mail.internal_date">邮箱收件时间</dt><dd v-if="mail.internal_date">{{displayTime(mail.internal_date)}}</dd>
   </dl>
   <p v-for="(quote,index) in quotes" :key="index" class="quote">{{quote}}</p>
+  <details v-if="changes.length"><summary>改期与取消记录（{{changes.length}}）</summary><div v-for="(c,i) in changes" :key="i" class="subtle-box"><strong>{{c.action==='cancel'?'取消':'改期'}} · {{c.subject}}</strong><p v-for="(e,j) in c.evidence" :key="j" class="quote">{{e.quote}}</p></div></details>
   <p v-if="unavailable" class="field-help">原邮件缓存已清理或不可用，已保存的待办仍可使用。</p>
   <details v-if="mail?.text_excerpt"><summary>查看保存的邮件文本</summary><pre>{{mail.text_excerpt}}</pre></details>
   <div v-if="links.length">

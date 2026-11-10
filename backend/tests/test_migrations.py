@@ -78,3 +78,25 @@ def test_newer_schema_is_refused_before_upgrade(tmp_path):
     assert exc.value.code == 'DATABASE_VERSION_UNSUPPORTED'
     with closing(sqlite3.connect(str(path))) as connection:
         assert connection.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '9999_future'
+
+
+def test_p0_live_upgrade_adds_event_details_without_changing_task_or_reminders(tmp_path):
+    s=create_app(tmp_path,start_workers=False).state.services
+    task=s.tasks.create(task_body())
+    s.db.engine.dispose()
+    with closing(sqlite3.connect(s.db.path)) as connection:
+        reminders=list(connection.execute('SELECT id,state,fire_at FROM reminders ORDER BY id'))
+        connection.execute('ALTER TABLE tasks DROP COLUMN event_details')
+        connection.execute("UPDATE alembic_version SET version_num='0003_parse_cache'")
+        connection.commit()
+    upgraded=create_app(tmp_path,start_workers=False).state.services
+    saved=upgraded.tasks.get(task['id'])
+    assert saved['starts_at']==task['starts_at']
+    assert saved['version']==task['version']
+    assert saved['event_details']=={'location':'','meeting_url':''}
+    with closing(sqlite3.connect(upgraded.db.path)) as connection:
+        assert list(connection.execute('SELECT id,state,fire_at FROM reminders ORDER BY id'))==reminders
+    snapshots=list((tmp_path/'backups').glob('pre-upgrade-*.sqlite'))
+    assert len(snapshots)==1
+    with closing(sqlite3.connect(snapshots[0])) as connection:
+        assert 'event_details' not in {r[1] for r in connection.execute('PRAGMA table_info(tasks)')}

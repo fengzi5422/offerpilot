@@ -2,6 +2,8 @@
 
 版本：0.1 评审草案｜日期：2026-11-09｜状态：待用户确认
 
+> 实施状态以 [当前进度](../../progress.md) 为准。2026-11-10 用户已追加授权 [P1 事件管理增量](2026-11-10-p1-events.md)，原始分期版本号为历史提案，当前本机产物版本为 0.2.0。
+
 ## 1. 依据与阅读方式
 
 依据：[PRD V1.0](../../../OfferPilot_Documents_v1.0/docs/OfferPilot_PRD_v1.0.md)、[HLD V1.0](../../../OfferPilot_Documents_v1.0/docs/OfferPilot_Technical_Design_v1.0.md)。原文作为需求基线，本组文档补充接口、数据约束和异常语义。新增默认值都是设计提案，不代表已获批准。

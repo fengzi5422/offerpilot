@@ -2,18 +2,19 @@
 
 本地优先的招聘邮件、求职待办与提醒助手，目标平台 Windows 10/11。
 
-当前阶段：P0 工程收尾已实现，正在进入真实环境验收。自动化与本机程序检查通过；真实邮箱七天、干净 Windows 和用户验收未完成，因此尚未规划 P1。
+当前版本 0.2.0：已按用户实测反馈修复日期时间填入，并完成 P1 事件管理：地点/会议链接、候选日期、关联原事件改期/取消、周日历与冲突提示。自动化和本机验收通过；P0 真实邮箱七天、干净 Windows 和用户验收仍待完成。
 
 - [当前进度与下一步](docs/progress.md)
 - [实施与验证日志](docs/implementation-log.md)
 - [P0 逐项验收与待验记录](docs/p0-acceptance.md)
+- [P1 事件管理验收](docs/p1-events-acceptance.md)
 
 - [详细设计总览](docs/superpowers/specs/2026-11-09-offerpilot-design.md)
 - [评审与验收清单](docs/superpowers/specs/offerpilot/15-review-and-acceptance.md)
 - [原始 PRD](OfferPilot_Documents_v1.0/docs/OfferPilot_PRD_v1.0.md)
 - [原始技术概要](OfferPilot_Documents_v1.0/docs/OfferPilot_Technical_Design_v1.0.md)
 
-原始文档保留在导入目录，新增设计和实施记录集中在根目录 docs/。历史设计中的“待确认”是原始评审状态，P0 授权以 [实施计划的确认记录](docs/superpowers/plans/2026-11-09-p0.md#approval) 为准。P1/P2 尚未纳入本轮。
+原始文档保留在导入目录，新增设计和实施记录集中在根目录 docs/。历史设计中的“待确认”是原始评审状态，P0 授权以 [实施计划的确认记录](docs/superpowers/plans/2026-11-09-p0.md#approval) 为准。本轮增量以 [P1 事件管理设计](docs/superpowers/specs/2026-11-10-p1-events.md) 为准，其余 P1/P2 不在范围内。
 
 ## 本机使用
 
@@ -21,7 +22,7 @@
 
 当前用户要求保留的测试安装和指定数据目录见[进度记录](docs/progress.md)。该实例以关闭托盘的测试参数启动；普通快捷方式使用默认数据目录，不是同一实例。
 
-首次可以跳过邮箱，先添加待办或导入 `.eml`。QQ 邮箱使用 IMAP 授权码，凭据存 Windows 凭据管理器；规则解析不需要模型密钥。时间不明确时进入待确认，只有确认的精确时刻才安排定时提醒。
+首次可以跳过邮箱，先添加待办或导入 `.eml`。收件识别可直接核对日期、时刻、地点和会议链接；多日期点击候选填入。改期/取消邮件需选择原事件；日历支持跳转日期和点击编辑。QQ 邮箱使用 IMAP 授权码，凭据存 Windows 凭据管理器；规则解析不需要模型密钥。时间不明确时进入待确认，只有确认的精确时刻才安排定时提醒。
 
 ## 开发环境
 

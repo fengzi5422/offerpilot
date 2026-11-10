@@ -21,6 +21,7 @@ from app.applications import ApplicationService
 from app.data_tools import DataTools
 from app.domain import AppError, iso, uid, utcnow
 from app.jobs import JobService
+from app.events import EventService
 from app.mail import MailService
 from app.observability import Diagnostics, safe_event
 from app.persistence import Database, SCHEMA_REVISION
@@ -116,13 +117,14 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         handler.close()
         logger.removeHandler(handler)
 
-    app = FastAPI(title="OfferPilot", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="OfferPilot", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.data_dir, app.state.bootstrap_code, app.state.sessions = data_dir, sessions.initial_code, sessions
     app.state.services = SimpleNamespace(db=db, settings=settings, tasks=tasks, reminders=reminders, mail=mail,
                                         accounts=accounts, jobs=jobs, data_tools=data_tools, clock=clock,
                                         worker_health=worker_health, autostart_callback=autostart_callback,
                                         applications=applications)
     app.state.services.diagnostics = diagnostics
+    app.state.services.events = EventService(db, tasks)
     app.state.origin = origin.rstrip("/")
 
     def error_response(request, exc):

@@ -114,7 +114,7 @@ class TaskService:
         next_reminder = session.scalar(select(Reminder).where(Reminder.task_id == task.id,
             Reminder.state.in_(["pending", "retry_wait", "claimed"])).order_by(Reminder.fire_at))
         return {"id": task.id, "title": task.title, "kind": task.kind, "status": task.status,
-                "application_id": task.application_id,
+                "application_id": task.application_id, "event_details": {"location":"","meeting_url":"",**(task.event_details or {})},
                 "priority": task.priority, "version": task.version, "temporal": task.temporal,
                 "due_at": iso(task.due_at), "starts_at": iso(task.starts_at), "ends_at": iso(task.ends_at),
                 "due_date": task.due_date, "confirmed": task.confirmed, "notes": task.notes,
@@ -127,6 +127,7 @@ class TaskService:
         temporal = data.temporal
         task.title, task.kind, task.priority, task.notes = data.title, data.kind, data.priority, data.notes
         task.application_id = data.application_id
+        task.event_details = data.event_details.model_dump()
         task.temporal = temporal.public()
         task.due_at = millis(temporal.due_at) if temporal.due_at else None
         task.starts_at = millis(temporal.starts_at) if temporal.starts_at else None
@@ -233,7 +234,7 @@ class TaskService:
         return items
 
     def patch(self, task_id, expected_version, changes):
-        if not isinstance(changes, dict) or set(changes) - {"title", "kind", "priority", "temporal", "notes", "status", "application_id"}:
+        if not isinstance(changes, dict) or set(changes) - {"title", "kind", "priority", "temporal", "notes", "status", "application_id", "event_details"}:
             raise AppError("VALIDATION_ERROR", "任务包含不支持的字段", 422)
         with self.db.task_lock(task_id), self.db.tx() as session:
             task = get_record(session, Task, task_id)
@@ -244,7 +245,7 @@ class TaskService:
                 task.status = changes["status"]
             if changes.get("application_id"):
                 get_record(session, Application, changes["application_id"])
-            original = {key: getattr(task, key) for key in ("title", "kind", "priority", "temporal", "notes", "application_id")}
+            original = {key: getattr(task, key) for key in ("title", "kind", "priority", "temporal", "notes", "application_id", "event_details")}
             self._apply(task, validated(TaskInput, {**original, **{key: value for key, value in changes.items() if key != "status"}}))
             task.manual_fields = sorted(set(task.manual_fields) | set(changes))
             task.version += 1

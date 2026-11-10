@@ -12,7 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.domain import AppError, millis, uid, utcnow
 
-SCHEMA_REVISION = "0003_parse_cache"
+SCHEMA_REVISION = "0004_event_details"
 
 
 class Base(DeclarativeBase):
@@ -29,6 +29,7 @@ class Record:
 class Task(Record, Base):
     __tablename__ = "tasks"
     application_id: Mapped[str | None] = mapped_column(ForeignKey("applications.id"), index=True)
+    event_details: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}')
     title: Mapped[str] = mapped_column(String)
     kind: Mapped[str] = mapped_column(String)
     priority: Mapped[int] = mapped_column(Integer, default=2)
@@ -243,7 +244,7 @@ class Database:
             with closing(sqlite3.connect(str(self.path))) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 revisions = list(connection.execute("SELECT version_num FROM alembic_version")) if "alembic_version" in tables else []
-                if tables and (len(revisions) != 1 or revisions[0][0] not in ("0001_p0", "0002_applications", SCHEMA_REVISION)):
+                if tables and (len(revisions) != 1 or revisions[0][0] not in ("0001_p0", "0002_applications", "0003_parse_cache", SCHEMA_REVISION)):
                     raise AppError("DATABASE_VERSION_UNSUPPORTED", "数据库版本不兼容，请使用对应版本或保留备份后恢复", 503)
                 previous = revisions[0][0] if revisions else None
                 if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":

@@ -114,7 +114,7 @@ class DataTools:
             data = {"schema_version": 1, "exported_at": iso(self.clock()), "tasks": tasks, "applications": exported_applications}
             return self._artifact(json.dumps(data, ensure_ascii=False, indent=2).encode(), "json", "application/json")
         columns = ["id", "company", "position", "title", "kind", "status", "priority", "due_at_utc", "due_date",
-                   "starts_at_utc", "timezone", "precision", "created_at_utc"]
+                   "starts_at_utc", "ends_at_utc", "location", "meeting_url", "timezone", "precision", "created_at_utc"]
         stream = io.StringIO(newline="")
         writer = csv.DictWriter(stream, columns)
         writer.writeheader()
@@ -128,6 +128,7 @@ class DataTools:
             if application:
                 row.update(company=application["company"], position=application["position"] or "")
             row.update(due_at_utc=task["due_at"] or "", starts_at_utc=task["starts_at"] or "",
+                       ends_at_utc=task.get("ends_at") or "", **task.get("event_details", {}),
                        timezone=task["temporal"].get("timezone") or "", precision=task["temporal"]["precision"],
                        created_at_utc=task["created_at"])
             for key, value in row.items():
@@ -204,7 +205,7 @@ class DataTools:
                 counts = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                           for table in ("tasks", "applications", "email_messages", "mail_accounts")}
             content = stage.read_bytes()
-            manifest = {"format_version": 1, "app_version": "0.1.0", "schema_revision": SCHEMA_REVISION,
+            manifest = {"format_version": 1, "app_version": "0.2.0", "schema_revision": SCHEMA_REVISION,
                         "created_at": iso(self.clock()), "files": [{"name": "data.sqlite", "size": len(content),
                         "sha256": digest(content)}], "record_counts": counts, "contains_evidence": bool(include_evidence),
                         "credentials_included": False}
@@ -242,9 +243,9 @@ class DataTools:
                 if len(profiles) != 1 or not isinstance(profile := json.loads(profiles[0][0]), dict):
                     raise ValueError()
                 self.tasks.settings._validate(DEFAULT_SETTINGS, profile)
-                for row in connection.execute("SELECT title,kind,priority,temporal,notes,status FROM tasks"):
+                for row in connection.execute("SELECT title,kind,priority,temporal,notes,status,event_details FROM tasks"):
                     from app.domain import TaskInput, validated
-                    validated(TaskInput, {"title": row[0], "kind": row[1], "priority": row[2],
+                    validated(TaskInput, {"title": row[0], "kind": row[1], "priority": row[2], "event_details": json.loads(row[6]),
                                           "temporal": json.loads(row[3]), "notes": row[4]})
                     if row[5] not in ("pending", "in_progress", "done", "cancelled"):
                         raise ValueError()
@@ -265,7 +266,7 @@ class DataTools:
                 if any(entry.flag_bits & 1 for entry in entries) or archive.getinfo("manifest.json").file_size > 65536:
                     raise ValueError()
                 manifest = json.loads(archive.read("manifest.json"))
-                if manifest.get("format_version") != 1 or manifest.get("schema_revision") not in ("0001_p0", "0002_applications", SCHEMA_REVISION):
+                if manifest.get("format_version") != 1 or manifest.get("schema_revision") not in ("0001_p0", "0002_applications", "0003_parse_cache", SCHEMA_REVISION):
                     raise AppError("BACKUP_VERSION_UNSUPPORTED", "备份版本不兼容，请使用对应版本应用", 422)
                 if manifest.get("credentials_included") is not False or len(manifest.get("files", [])) != 1:
                     raise ValueError()

@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -87,6 +88,24 @@ class Temporal(BaseModel):
         return result
 
 
+class EventDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    location: str = Field(default="", max_length=1000)
+    meeting_url: str = Field(default="", max_length=4096)
+
+    @model_validator(mode="after")
+    def safe_link(self):
+        self.location, self.meeting_url = self.location.strip(), self.meeting_url.strip()
+        if self.meeting_url:
+            try:
+                parsed = urlsplit(self.meeting_url)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                    raise ValueError()
+            except ValueError:
+                raise ValueError("会议链接必须是有效的 http/https 地址") from None
+        return self
+
+
 class TaskInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1, max_length=200)
@@ -95,6 +114,7 @@ class TaskInput(BaseModel):
     application_id: str | None = Field(default=None, max_length=36)
     temporal: Temporal = Field(default_factory=Temporal)
     notes: str = Field(default="", max_length=4000)
+    event_details: EventDetails = Field(default_factory=EventDetails)
 
     @model_validator(mode="after")
     def trim_title(self):

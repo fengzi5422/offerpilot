@@ -81,6 +81,35 @@ def check(executable, data):
                     break
                 time.sleep(.1)
             assert mail['state'] == 'review_needed'
+            def import_event(text, label):
+                content=('From: hr@example.test\r\nSubject: 示例科技 '+label+'\r\n'
+                         'Content-Type: text/plain; charset=utf-8\r\n\r\n'+text).encode()
+                uploaded=client.post('/api/v1/emails/import',files={'file':('event.eml',content)})
+                uploaded.raise_for_status()
+                message=wait(uploaded.json()['data'])['message_id']
+                for _ in range(100):
+                    result=get('/emails/'+message)
+                    if result['state']!='new':
+                        return result
+                    time.sleep(.1)
+                raise TimeoutError('Event parse did not finish')
+
+            event_mail=import_event('面试安排如下：\n面试时间：2050年1月2日15:00-16:00（北京时间）\n'
+                '面试地点：上海市示例路100号\n会议链接：https://meet.example.test/room','面试安排')
+            candidate=event_mail['candidates'][0]
+            event=get('/tasks/'+candidate['task_id'])
+            assert event['event_details']['location']=='上海市示例路100号'
+            assert event['ends_at']=='2050-01-02T08:00:00Z'
+            calendar=get('/calendar?start=2050-01-02&end=2050-01-03&timezone=Asia/Shanghai')
+            assert event['id'] in {t['id'] for t in calendar['entries']}
+            change=import_event('原定面试改期至2050年1月3日16:00（北京时间）。','面试改期')
+            changed=post('/emails/'+change['id']+'/resolve-change',{
+                'candidate_id':change['candidates'][0]['candidate_id'],'task_id':event['id'],
+                'expected_version':change['version'],'expected_task_version':event['version'],
+                'action':'reschedule','temporal':change['candidates'][0]['temporal']})['task']
+            assert changed['id']==event['id'] and changed['starts_at']=='2050-01-03T08:00:00Z'
+            assert changed['event_details']==event['event_details']
+            assert len(get('/tasks'))==2
             artifact = wait(post('/diagnostics/export', {}))
             diagnostic = client.get('/api/v1/artifacts/' + artifact['artifact_id'])
             diagnostic.raise_for_status()
@@ -97,7 +126,9 @@ def check(executable, data):
             assert client.get('/api/v1/tasks').status_code == 401
             login(client)
             assert get('/tasks/' + task['id'])['title'] == 'PRIVATE_SMOKE_TITLE'
-            print('PASS: packaged startup, UI, login, task, queued import, independent parse, diagnostics, backup, restore, session reset')
+            assert get('/tasks/'+event['id'])['event_details']==event['event_details']
+            assert get('/tasks/'+event['id'])['starts_at']==changed['starts_at']
+            print('PASS: packaged startup, UI, login, tasks, queued import, event details/range, calendar, stable-ID reschedule, diagnostics, backup, restore, session reset')
     finally:
         process.terminate()
         process.wait(timeout=10)
