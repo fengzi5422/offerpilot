@@ -1,0 +1,1 @@
+"""OfferPilot local application."""

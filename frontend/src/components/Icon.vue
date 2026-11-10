@@ -1,0 +1,5 @@
+<script setup lang="ts">
+defineProps<{name:string;size?:number}>();
+const paths:Record<string,string>={tasks:'M9 5h11M9 12h11M9 19h11M3 5l1 1 2-3M3 12l1 1 2-3M3 19l1 1 2-3',inbox:'M4 4h16v16H4zM4 13h4l2 3h4l2-3h4',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2',bell:'M5 17h14l-2-3V9a5 5 0 0 0-10 0v5zM10 21h4',plus:'M12 5v14M5 12h14',arrow:'M5 12h14m-5-5 5 5-5 5',close:'M6 6l12 12M6 18 18 6',check:'M4 12l5 5L20 6',clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 7v6l4 2',upload:'M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6',leaf:'M4 19C2 8 9 3 21 3c0 12-6 19-17 16Zm0 0L16 8',chevron:'m9 5 7 7-7 7',mail:'M3 5h18v14H3zM3 5l9 8 9-8',more:'M5 12h.01M12 12h.01M19 12h.01',download:'M12 3v13m-5-5 5 5 5-5M4 16v5h16v-5'};
+</script>
+<template><svg :width="size??20" :height="size??20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name]??paths.tasks"/></svg></template>

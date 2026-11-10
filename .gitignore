@@ -24,3 +24,6 @@ playwright-report/
 *.egg-info/
 .worktrees/
 .tool-cache/
+.playwright-cli/
+output/
+*.tsbuildinfo

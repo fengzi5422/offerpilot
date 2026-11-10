@@ -1,0 +1,7 @@
+<script setup lang="ts">
+import {onMounted,onUnmounted,ref} from 'vue';import Icon from './Icon.vue';
+defineProps<{title:string;wide?:boolean}>();const emit=defineEmits<{close:[]}>();const panel=ref<HTMLElement>();let previous:HTMLElement|null=null;
+function keyboard(e:KeyboardEvent){if(e.key==='Escape')emit('close');if(e.key==='Tab'){const list=panel.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]');if(!list?.length)return;const first=list[0],last=list[list.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}
+onMounted(()=>{previous=document.activeElement as HTMLElement;panel.value?.querySelector<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled)')?.focus();document.addEventListener('keydown',keyboard);});onUnmounted(()=>{document.removeEventListener('keydown',keyboard);previous?.focus();});
+</script>
+<template><Teleport to="body"><div class="modal-backdrop" @mousedown.self="emit('close')"><section ref="panel" tabindex="-1" class="modal" :class="{wide}" role="dialog" aria-modal="true" :aria-label="title"><header class="modal-head"><h2>{{title}}</h2><button class="icon-button" aria-label="关闭" @click="emit('close')"><Icon name="close"/></button></header><slot/></section></div></Teleport></template>

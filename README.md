@@ -2,11 +2,48 @@
 
 本地优先的招聘邮件、求职待办与提醒助手，目标平台 Windows 10/11。
 
-当前阶段：详细设计评审。业务代码尚未开发；用户确认设计及范围后实施。
+当前阶段：P0 开发原型联调。2026-11-09 已批准推荐设计；任务、邮件识别与审核、提醒、账户、备份恢复及界面已有实现。真实邮箱长期运行和干净 Windows 安装验收仍未完成。
+
+- [当前进度与下一步](docs/progress.md)
+- [实施与验证日志](docs/implementation-log.md)
 
 - [详细设计总览](docs/superpowers/specs/2026-11-09-offerpilot-design.md)
 - [评审与验收清单](docs/superpowers/specs/offerpilot/15-review-and-acceptance.md)
 - [原始 PRD](OfferPilot_Documents_v1.0/docs/OfferPilot_PRD_v1.0.md)
 - [原始技术概要](OfferPilot_Documents_v1.0/docs/OfferPilot_Technical_Design_v1.0.md)
 
-原始文档保留在导入目录，新增设计集中在根目录 docs/。环境安装、依赖锁定和启动脚本属于设计确认后的首个开发工作包。
+原始文档保留在导入目录，新增设计和实施记录集中在根目录 docs/。历史设计中的“待确认”是原始评审状态，P0 授权以 [实施计划的确认记录](docs/superpowers/plans/2026-11-09-p0.md#approval) 为准。P1/P2 尚未纳入本轮。
+
+## 本机使用
+
+打包程序位于构建目录 `dist/OfferPilot/OfferPilot.exe`，双击打开。关闭网页后后台托盘继续运行；托盘“退出”会停止同步与提醒。程序默认使用 `%LOCALAPPDATA%/OfferPilot`，开发与检查数据使用项目 `.runtime/`，互不混用。
+
+首次可以跳过邮箱，先添加待办或导入 `.eml`。QQ 邮箱使用 IMAP 授权码，凭据存 Windows 凭据管理器；规则解析不需要模型密钥。时间不明确时进入待确认，只有确认的精确时刻才安排定时提醒。
+
+## 开发环境
+
+Python 由 uv 按 `.python-version` 创建项目 `.venv`，依赖冻结在 `uv.lock`；前端使用 Node 22 LTS 和 `frontend/package-lock.json`。当前验证环境为 Python 3.12.13、Node 22.19.0、npm 10.9.3。
+
+```powershell
+# 在仓库目录执行；不修改系统或 Conda 基础环境。
+uv sync --frozen
+cd frontend
+npm ci
+cd ..
+./scripts/dev_start.ps1
+
+# 全部自动化检查
+./scripts/check.ps1
+
+# Windows onedir；安装包另需 Inno Setup 的 ISCC.exe
+./scripts/build_windows.ps1
+./scripts/build_windows.ps1 -Installer
+```
+
+`.env.example` 只记录非敏感配置示例，不自动加载；可通过启动参数 `--data-dir` 或 `OFFERPILOT_DATA_DIR` 指定目录。不要把授权码、真实邮件和数据库提交到 Git。
+
+## 日志与恢复
+
+数据目录的 `logs/` 保存脱敏结构化日志，限制文件大小和轮换数量；业务变更另有数据库审计记录。日志不记录正文、授权码、会话密钥或链接查询参数。
+
+运行期间每 24 小时生成一次不含凭据的本机备份，在 `backups/automatic-*.zip` 保留最近五份；手动下载和恢复前快照独立保留。设置页提供 CSV/JSON、手动备份及两阶段恢复。恢复替换当前数据后，需从托盘重新打开并重新授权邮箱。自动备份只有程序运行时才会执行。
