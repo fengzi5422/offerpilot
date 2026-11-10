@@ -1,6 +1,6 @@
 [project]
 name = "offerpilot"
-version = "1.0.0rc3"
+version = "1.0.0rc4"
 description = "Local-first recruitment task assistant"
 requires-python = ">=3.12,<3.13"
 dependencies = [

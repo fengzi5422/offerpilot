@@ -8,4 +8,4 @@ export interface EventDetails {location:string;meeting_url:string}
 export interface Task {event_details?:EventDetails;ends_at?:string|null;confirmed?:boolean}
 export interface Candidate {event_details?:EventDetails;task_id?:string|null}
 export interface Candidate {parser_source?:string}
-export interface Mail {classification?:{ai_status?:string;ai_error_code?:string;[key:string]:unknown}}
+export interface Mail {classification?:{ai_status?:string;ai_error_code?:string;ai_validation?:{reason_code?:string;field?:string};[key:string]:unknown}}

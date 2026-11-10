@@ -13,7 +13,7 @@ const operation=ref('load'),error=ref(''),message=ref(''),confirmDelete=ref(fals
 const busy=computed(()=>!!operation.value);
 const unsaved=computed(()=>!!saved.value&&(draft.value.enabled!==saved.value.enabled||
  draft.value.baseUrl.trim()!==saved.value.base_url||draft.value.model.trim()!==saved.value.model||!!draft.value.apiKey.trim()));
-const runtimeMessage=computed(()=>aiRuntimeMessage(saved.value?.runtime?.last_error_code));
+const runtimeMessage=computed(()=>aiRuntimeMessage(saved.value?.runtime?.last_error_code,saved.value?.runtime?.validation));
 const canTest=computed(()=>!!saved.value?.enabled&&!unsaved.value&&!busy.value);
 watch(()=>[draft.value.baseUrl,draft.value.model],()=>{draft.value.consent=false;});
 

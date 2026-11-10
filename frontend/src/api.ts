@@ -1,6 +1,6 @@
 import {aiRuntimeMessage} from './integrations';
 import {mailboxErrorMessage} from './settings';
-export class ApiError extends Error { constructor(public code:string,message:string,public status:number){super(message);} }
+export class ApiError extends Error { constructor(public code:string,message:string,public status:number,public validation?:{reason_code?:string;field?:string}){super(message);} }
 let csrf='';
 const pendingKeys=new Map<string,string>();
 export async function request<T=any>(path:string,method='GET',body?:unknown,key?:string,envelope=false):Promise<T>{
@@ -11,7 +11,7 @@ export async function request<T=any>(path:string,method='GET',body?:unknown,key?
  const response=await fetch(`/api/v1${path}`,{method,headers,credentials:'same-origin',body:method==='GET'?undefined:body instanceof FormData?body:JSON.stringify(body??{})});
  const result=await response.json().catch(()=>({}));
  if(response.ok||response.status<500)pendingKeys.delete(command);
- if(!response.ok)throw new ApiError(result.error?.code??'REQUEST_FAILED',result.error?.message??`请求失败（${response.status}）`,response.status);
+ if(!response.ok)throw new ApiError(result.error?.code??'REQUEST_FAILED',result.error?.message??`请求失败（${response.status}）`,response.status,result.error);
  return (envelope?result:result.data) as T;
 }
 export function requestPage<T>(path:string){return request<{data:T[];next_cursor?:string|null}>(path,'GET',undefined,undefined,true);}
@@ -29,7 +29,7 @@ export async function waitJob(id:string,options:{onProgress?:(job:any)=>void;isC
   if(options.isCurrent&&!options.isCurrent())return null;
   options.onProgress?.(job);
   if(job.status==='succeeded'||job.state==='succeeded')return job;
-  if(['failed','interrupted'].includes(job.status??job.state))throw new Error(job.error_code?.startsWith('MAIL_')?mailboxErrorMessage(job.error_code):jobErrors[job.error_code]??(job.kind==='ai_parse'?aiRuntimeMessage(job.error_code):'操作未完成，请重试或在诊断中查看状态。'));
+  if(['failed','interrupted'].includes(job.status??job.state))throw new Error(job.error_code?.startsWith('MAIL_')?mailboxErrorMessage(job.error_code):jobErrors[job.error_code]??(job.kind==='ai_parse'?aiRuntimeMessage(job.error_code,job.progress?.validation):'操作未完成，请重试或在诊断中查看状态。'));
   await new Promise(r=>setTimeout(r,1000));
  }
  throw new Error('操作仍在后台进行，请稍后查看状态');

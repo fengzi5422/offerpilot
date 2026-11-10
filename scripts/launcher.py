@@ -133,7 +133,7 @@ def main():
                                 open_ui()
                                 connection.send({'opened':bool(desktop)})
                             elif command == 'get_status':
-                                connection.send({'version':'1.0.0-rc.3','ui':'desktop' if desktop else 'headless',
+                                connection.send({'version':'1.0.0-rc.4','ui':'desktop' if desktop else 'headless',
                                                  'visible':desktop.visible if desktop else False})
                             elif command == 'close_ui':
                                 if desktop:

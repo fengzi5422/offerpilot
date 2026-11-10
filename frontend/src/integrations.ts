@@ -1,7 +1,7 @@
 export interface AISettings {
  enabled:boolean; base_url:string; model:string; has_secret:boolean; version:number;
  consent_version?:string|null;
- runtime?:{queued?:number;last_error_code?:string|null;paused_until?:string|null};
+ runtime?:{queued?:number;last_error_code?:string|null;paused_until?:string|null;validation?:{reason_code?:string;field?:string}};
 }
 export interface AISettingsDraft {enabled:boolean;baseUrl:string;model:string;apiKey:string;consent:boolean}
 export interface AISettingsPatch {expected_version:number;changes:{enabled:boolean;base_url?:string;model?:string;api_key?:string;consent?:true}}
@@ -41,6 +41,7 @@ const messages:Record<string,string>={
  AI_RATE_LIMITED:'AI 服务请求较多，稍后会重试。规则识别仍可独立使用。',
  AI_SERVICE_FAILED:'AI 服务暂时不可用，请检查服务状态后重试。规则识别仍可独立使用。',
  AI_OUTPUT_INVALID:'服务返回的建议无法与原文核对，本次保留规则识别结果。',
+ AI_TEST_NO_EVENT:'服务已连接，但没有正确识别出测试事件，请检查所选模型后重新测试。',
  AI_OUTPUT_INCOMPLETE:'AI 服务仍未返回完整事件数据，已自动扩大输出预算恢复一次。请稍后重试；已有事件保持不变。',
  AI_COOLDOWN:'AI 连续失败后已暂时暂停，请检查服务配置，或稍后重试。规则识别仍可使用。',
  AI_INPUT_CHANGED:'邮件或设置已变化，本次 AI 已取消；请核对当前内容后重新识别。',
@@ -65,9 +66,21 @@ const messages:Record<string,string>={
 export function aiSettingsError(error:unknown):string{
  if(error instanceof AIFormError)return error.message;
  const code=error&&typeof error==='object'&&'code' in error?error.code:undefined;
+ if(code==='AI_OUTPUT_INVALID'&&error&&typeof error==='object'&&'validation' in error)return aiRuntimeMessage(code,error.validation as {reason_code?:string});
  return typeof code==='string'&&messages[code]?messages[code]:'AI 设置操作未完成，请检查连接后重试。规则识别仍可独立使用。';
 }
-export function aiRuntimeMessage(code:unknown):string{
+const validationMessages:Record<string,string>={
+ AI_TIME_CONFLICT:'AI 返回的日期或时间与原文有时间冲突，本项未采用，请核对原文时间。',
+ AI_SCHEMA_INVALID:'AI 未按要求返回事件 JSON，请检查模型是否支持 JSON 输出后重试。',
+ AI_EVIDENCE_NOT_FOUND:'AI 引用的文字未在原文找到，本项未采用；已有识别结果保留。',
+ AI_EVIDENCE_AMBIGUOUS:'AI 引用对应原文中多个不同事件，无法确定所属事项，请手动核对。',
+ AI_EVIDENCE_CONFLICT:'AI 将不同事项的信息混在一起，本项未采用，请分别核对。',
+ AI_COMPANY_NOT_FOUND:'AI 返回的公司名称未能在原文核对，本项未采用。',
+ AI_TOOLS_REJECTED:'AI 未返回事件数据，请检查模型设置后重试。',
+ AI_FIELD_INVALID:'AI 返回的字段格式不正确，本项未采用；已有识别结果保留。',
+};
+export function aiRuntimeMessage(code:unknown,validation?:{reason_code?:string;field?:string}|null):string{
  if(!code)return '';
+ if(code==='AI_OUTPUT_INVALID'&&validation?.reason_code&&validationMessages[validation.reason_code])return validationMessages[validation.reason_code];
  return typeof code==='string'&&messages[code]?messages[code]:'AI 上次处理未完成，规则识别仍可独立使用；可检查配置并测试连接。';
 }

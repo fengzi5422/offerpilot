@@ -11,8 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.domain import AppError
 from app.domain import EventDetails
-from app.event_parser import action_blocks
-from app.mail import parse_temporal
+from app.ai_grounding import EvidenceIndex, aligned, grounded_time, invalid
 from app.outbound import OutboundClient
 
 LABELS = {'reply': '回复确认', 'materials': '提交材料', 'assessment': '完成测评',
@@ -35,7 +34,13 @@ class SuggestedAction(BaseModel):
 
 class SuggestedActions(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    actions: list[SuggestedAction] = Field(max_length=10)
+    actions: list[object] = Field(max_length=10)
+
+
+class AIParseResult(list):
+    def __init__(self):
+        super().__init__()
+        self.validation_warnings = []
 
 
 def redact(text):
@@ -141,93 +146,96 @@ class AIParser:
                     if not attempt:
                         continue
                     raise AppError('AI_OUTPUT_INCOMPLETE', 'AI 服务未返回完整事件数据，已自动恢复一次；请稍后重试', 503) from None
-                raise AppError('AI_OUTPUT_INVALID', 'AI 建议无法核对原文，已保留规则识别结果', 503) from None
+                raise invalid('AI_SCHEMA_INVALID', 'response') from None
             break
-        try:
-            if message.get('tool_calls') or message.get('function_call'):
-                raise ValueError()
-            result = SuggestedActions.model_validate_json(content)
-            drafts, seen = [], set()
-            def evidence(quote, field):
-                if body.count(quote) != 1:
-                    raise ValueError()
-                offset = body.index(quote)
-                begin, end = mapping[offset][0], mapping[offset + len(quote) - 1][1]
-                original = text[begin:end]
-                # Reject partial matches inside a redaction placeholder.
-                if (offset and mapping[offset - 1] == mapping[offset] or
-                        offset + len(quote) < len(mapping) and mapping[offset + len(quote) - 1] == mapping[offset + len(quote)]):
-                    raise ValueError()
-                return {'message_id': mail.id, 'text_hash': mail.text_hash, 'segment_id': str(begin),
-                    'start': begin, 'end': end, 'quote': original, 'field': field}
-            for action in result.actions:
-                action_evidence = evidence(action.quote, 'action')
-                begin, end = action_evidence['start'], action_evidence['end']
-                original = action_evidence['quote']
-                if action.company and (action.company not in subject + '\n' + body or '[联系信息' in action.company):
-                    raise ValueError()
-                key = (action.kind, begin, end)
-                if key in seen:
-                    continue
-                seen.add(key)
-                proofs = [action_evidence]
-                # Recover adjacent labelled details only within one matching action.
-                blocks = [b for b in action_blocks(text) if b['kind'] == action.kind and b['start'] < end and b['end'] > begin]
-                context = blocks[0]['text'] if len(blocks) == 1 else original
-                if context != original:
-                    proofs.append({**action_evidence, 'field': 'context', 'start': blocks[0]['start'],
-                        'end': blocks[0]['end'], 'quote': context})
-                time_text = context
-                if action.time_quote:
-                    proof = evidence(action.time_quote, 'time')
-                    proofs.append(proof)
-                    time_text = proof['quote']
-                details = {'location': '', 'meeting_url': ''}
-                for field, quote in (('location', action.location_quote), ('meeting_url', action.meeting_quote)):
-                    field_text = context
-                    if quote:
-                        proof = evidence(quote, field)
-                        proofs.append(proof)
-                        field_text = proof['quote']
-                    if field == 'location':
-                        found = re.search(r'(?:地点|地址|会场)\s*[:：]\s*([^\n。；;]+)', field_text)
-                        if found:
-                            details[field] = found[1].strip()[:1000]
-                        elif quote and not re.search(r'https?://', field_text):
-                            details[field] = field_text.strip()[:1000]
-                    else:
-                        found = re.search(r'https?://[^\s<>"\u3002]+', field_text)
-                        if found:
-                            details[field] = found[0].rstrip('，,；;）)')
-                details = EventDetails.model_validate(details).model_dump()
-                temporal = parse_temporal(time_text, action.kind, profile.get('timezone', 'Asia/Shanghai'),
-                    mail.header_date, mail.internal_date, profile.get('default_event_year', 2026))
-                contextual = parse_temporal(context, action.kind, profile.get('timezone', 'Asia/Shanghai'),
-                    mail.header_date, mail.internal_date, profile.get('default_event_year', 2026))
-                if contextual['precision'] == 'minute' and not contextual['needs_confirmation']:
-                    temporal = contextual
-                local_start = temporal.get('starts_at') or temporal.get('due_at')
-                local_start = datetime.fromisoformat(local_start).astimezone(ZoneInfo(temporal['timezone'])) if local_start else None
-                local_end = temporal.get('ends_at')
-                local_end = datetime.fromisoformat(local_end).astimezone(ZoneInfo(temporal['timezone'])) if local_end else None
-                grounded = {'date': local_start.strftime('%Y-%m-%d') if local_start else temporal.get('local_date'),
-                    'time': local_start.strftime('%H:%M') if local_start else None,
-                    'end_date': local_end.strftime('%Y-%m-%d') if local_end else None,
-                    'end_time': local_end.strftime('%H:%M') if local_end else None}
-                for field, expected in grounded.items():
-                    if getattr(action, field) is not None and getattr(action, field) != expected:
-                        raise ValueError()
-                issues = ['AI_REQUIRES_REVIEW', *temporal['reason_codes']]
-                if not action.company:
-                    issues.append('COMPANY_MISSING')
-                if re.search(r'取消|改期|延期|重新安排|cancel|reschedul', mail.subject + '\n' + text, re.I):
-                    issues.append('CHANGE_REQUIRES_REVIEW')
-                if mail.text_truncated:
-                    issues.append('TEXT_TRUNCATED')
-                drafts.append({'title': ((action.company + ' · ') if action.company else '') + LABELS[action.kind],
-                    'company': action.company, 'kind': action.kind, 'priority': 2, 'temporal': temporal,
-                    'parser_source': 'ai', 'issues': list(dict.fromkeys(issues)),
-                    'event_details': details, 'evidence': proofs})
-            return drafts
-        except (ValueError, TypeError, KeyError, IndexError, ValidationError, RecursionError):
-            raise AppError('AI_OUTPUT_INVALID', 'AI 建议无法核对原文，已保留规则识别结果', 503) from None
+        if message.get('tool_calls') or message.get('function_call'):
+            raise invalid('AI_TOOLS_REJECTED', 'response')
+        result = SuggestedActions.model_validate_json(content)
+        drafts, seen, errors = AIParseResult(), set(), []
+        index = EvidenceIndex(mail, text, body, mapping)
+        for item in result.actions:
+            try:
+                try:
+                    action = SuggestedAction.model_validate(item)
+                except ValidationError:
+                    raise invalid('AI_SCHEMA_INVALID', 'action') from None
+                draft = self._draft(action, mail, profile, text, subject, body, index)
+                proof = draft['evidence'][0]
+                key = (draft['kind'], proof['start'], proof['end'])
+                if key not in seen:
+                    seen.add(key)
+                    drafts.append(draft)
+            except AppError as error:
+                errors.append(error)
+                drafts.validation_warnings.append(error.fields)
+            except (ValueError, TypeError, KeyError, IndexError, ValidationError, RecursionError):
+                error = invalid('AI_FIELD_INVALID', 'action')
+                errors.append(error)
+                drafts.validation_warnings.append(error.fields)
+        if errors and not drafts:
+            raise errors[0]
+        return drafts
+
+    def _draft(self, action, mail, profile, text, subject, body, index):
+        action_evidence = index.action(action)
+        original = action_evidence['quote']
+        if action.company and (aligned(action.company)[0] not in aligned(subject + '\n' + body)[0] or '[联系信息' in action.company):
+            raise invalid('AI_COMPANY_NOT_FOUND', 'company')
+        proofs = [action_evidence]
+        block = index.block(action_evidence, action.kind)
+        context = block['text'] if block else original
+        if context != original:
+            proofs.append({**action_evidence, 'field': 'context', 'start': block['start'],
+                'end': block['end'], 'quote': context})
+        time_text = context
+        if action.time_quote:
+            proof = index.field(action.time_quote, 'time', action_evidence, action.kind)
+            proofs.append(proof)
+            time_text = proof['quote']
+        details = {'location': '', 'meeting_url': ''}
+        for field, quote in (('location', action.location_quote), ('meeting_url', action.meeting_quote)):
+            field_text = context
+            if quote:
+                proof = index.field(quote, field, action_evidence, action.kind)
+                proofs.append(proof)
+                field_text = proof['quote']
+            if field == 'location':
+                found = re.search(r'(?:地点|地址|会场)\s*[:：]\s*([^\n。；;]+)', field_text)
+                if found:
+                    details[field] = found[1].strip()[:1000]
+                elif quote and not re.search(r'https?://', field_text):
+                    details[field] = field_text.strip()[:1000]
+            else:
+                found = re.search(r'https?://[^\s<>"\u3002]+', field_text)
+                if found:
+                    details[field] = found[0].rstrip('，,；;）)')
+        details = EventDetails.model_validate(details).model_dump()
+        temporal = grounded_time(time_text, action.kind, profile, mail)
+        contextual = grounded_time(context, action.kind, profile, mail)
+        if contextual['precision'] == 'minute' and not contextual['needs_confirmation']:
+            temporal = contextual
+        local_start = temporal.get('starts_at') or temporal.get('due_at')
+        local_start = datetime.fromisoformat(local_start).astimezone(ZoneInfo(temporal['timezone'])) if local_start else None
+        local_end = temporal.get('ends_at')
+        local_end = datetime.fromisoformat(local_end).astimezone(ZoneInfo(temporal['timezone'])) if local_end else None
+        grounded = {'date': local_start.strftime('%Y-%m-%d') if local_start else temporal.get('local_date'),
+            'time': local_start.strftime('%H:%M') if local_start else None,
+            'end_date': local_end.strftime('%Y-%m-%d') if local_end else None,
+            'end_time': local_end.strftime('%H:%M') if local_end else None}
+        issues = ['AI_REQUIRES_REVIEW', *temporal['reason_codes']]
+        for field, expected in grounded.items():
+            proposed = getattr(action, field)
+            if proposed is not None and expected is not None and proposed != expected:
+                raise invalid('AI_TIME_CONFLICT', field)
+            if proposed is not None and expected is None:
+                issues.append('AI_TIME_UNSUPPORTED')
+        if not action.company:
+            issues.append('COMPANY_MISSING')
+        if re.search(r'取消|改期|延期|重新安排|cancel|reschedul', mail.subject + '\n' + text, re.I):
+            issues.append('CHANGE_REQUIRES_REVIEW')
+        if mail.text_truncated:
+            issues.append('TEXT_TRUNCATED')
+        return {'title': ((action.company + ' · ') if action.company else '') + LABELS[action.kind],
+            'company': action.company, 'kind': action.kind, 'priority': 2, 'temporal': temporal,
+            'parser_source': 'ai', 'issues': list(dict.fromkeys(issues)),
+            'event_details': details, 'evidence': proofs}

@@ -19,7 +19,10 @@ def action_kind(text):
 
 
 def has_date(text):
-    return bool(re.search(r'\d{1,4}[年/月.-]\d|明天|后天|本周|下周|收到后|小时', text))
+    return bool(re.search(r'\d{1,4}[年/月.-]\d|明天|后天|本周|下周|收到后|小时'
+        r'|[零〇一二两三四五六七八九十]{1,3}月[零〇一二两三四五六七八九十\d]{1,3}[日号]'
+        r'|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?'
+        r'|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b', text, re.I))
 
 
 def action_blocks(text):

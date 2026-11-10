@@ -14,6 +14,16 @@ from app.mail import parse_temporal
 from app.persistence import Candidate, Email, Job, Setting, check_version, get_record
 
 TRANSIENT = {'AI_RATE_LIMITED', 'AI_SERVICE_FAILED', 'SERVICE_TIMEOUT', 'SERVICE_NETWORK_ERROR'}
+CONTENT_ERRORS = {'AI_OUTPUT_INVALID', 'AI_OUTPUT_INCOMPLETE', 'AI_TEST_NO_EVENT'}
+VALIDATION_REASONS = {'AI_EVIDENCE_NOT_FOUND', 'AI_EVIDENCE_AMBIGUOUS', 'AI_EVIDENCE_CONFLICT',
+    'AI_TIME_CONFLICT', 'AI_SCHEMA_INVALID', 'AI_COMPANY_NOT_FOUND', 'AI_TOOLS_REJECTED', 'AI_FIELD_INVALID'}
+VALIDATION_FIELDS = {'action', 'response', 'company', 'date', 'time', 'end_date', 'end_time', 'location', 'meeting_url'}
+
+
+def safe_validation(fields):
+    if fields and fields.get('reason_code') in VALIDATION_REASONS and fields.get('field') in VALIDATION_FIELDS:
+        return {'reason_code': fields['reason_code'], 'field': fields['field']}
+    return {}
 
 
 def enrich_open_candidate(old, suggestion):
@@ -60,6 +70,10 @@ class AIWorker:
         with db.tx() as session:
             if not session.get(Setting, 'ai_runtime'):
                 session.add(Setting(id='ai_runtime', value={'failures': 0, 'paused_until': None, 'last_error_code': None}))
+            else:
+                runtime = session.get(Setting, 'ai_runtime')
+                if runtime.value.get('last_error_code') in CONTENT_ERRORS and not runtime.value.get('auth_blocked'):
+                    runtime.value = {**runtime.value, 'failures': 0, 'paused_until': None}
             for job in session.scalars(select(Job).where(Job.kind == 'ai_parse', Job.status == 'interrupted', Job.error_code == 'APP_RESTARTED')):
                 job.status, job.error_code = 'queued', None
 
@@ -67,7 +81,7 @@ class AIWorker:
         with self.db.read() as session:
             record = session.get(Setting, 'ai_runtime')
             value = record.value if record else {}
-            return {'last_error_code': value.get('last_error_code'), 'paused_until': iso(value.get('paused_until')),
+            return {'last_error_code': value.get('last_error_code'), 'validation': value.get('validation'), 'paused_until': iso(value.get('paused_until')),
                 'queued': session.scalar(select(func.count()).select_from(Job).where(Job.kind == 'ai_parse', Job.status == 'queued'))}
 
     def stop(self):
@@ -86,12 +100,14 @@ class AIWorker:
                 yield
         config['_dispatch_guard'] = guard
         sample = SimpleNamespace(id='fixed-example', subject='示例公司招聘通知',
-            text_excerpt='请于2026年12月18日09:30参加技术面试。', text_hash='fixed-example',
+            text_excerpt='请于2026年12月18日09:30（北京时间）参加技术面试。', text_hash='fixed-example',
             header_date=None, internal_date=None, text_truncated=False)
         if not self.lock.acquire(blocking=False):
             raise AppError('AI_QUEUE_FULL', 'AI 正在识别，请稍后测试', 409)
         try:
-            self.parser.parse(sample, self.settings.get(), config)
+            results = self.parser.parse(sample, self.settings.get(), config)
+            if not any(r['temporal'].get('starts_at') == '2026-12-18T01:30:00Z' for r in results):
+                raise AppError('AI_TEST_NO_EVENT', '服务已连接，但没有识别出测试事件，请检查模型设置', 503)
             return {'status': 'validated'}
         finally:
             self.lock.release()
@@ -137,6 +153,9 @@ class AIWorker:
             pending = list(session.scalars(select(Job).where(Job.kind == 'ai_parse', Job.status.in_(['queued', 'running']))))
             prior = next((j for j in pending if j.progress.get('message_id') == message_id), None)
             if prior:
+                if force:
+                    prior.progress = {**prior.progress, 'requested_by_user': True,
+                                      'retry_at': 0 if prior.status == 'queued' else prior.progress.get('retry_at', 0)}
                 return prior.id
             if len(pending) >= 20:
                 if force:
@@ -145,7 +164,8 @@ class AIWorker:
             mail.version += 1
             mail.classification = {**mail.classification, 'ai_status': 'queued'}
             job = Job(kind='ai_parse', status='queued', progress={'message_id': message_id,
-                'mail_version': mail.version, 'config_version': self.integrations.get('ai', session)['version'], 'attempt': 0})
+                'mail_version': mail.version, 'config_version': self.integrations.get('ai', session)['version'],
+                'requested_by_user': force, 'attempt': 0})
             session.add(job)
             session.flush()
             return job.id
@@ -167,6 +187,7 @@ class AIWorker:
             if runtime and (runtime.value.get('auth_blocked') or (runtime.value.get('paused_until') or 0) > now):
                 return
             jobs = list(session.scalars(select(Job).where(Job.kind == 'ai_parse', Job.status == 'queued').order_by(Job.created_at, Job.id)))
+            jobs.sort(key=lambda j: not j.progress.get('requested_by_user', False))
             selected = next((j for j in jobs if j.progress.get('retry_at', 0) <= now), None)
             if not selected:
                 return
@@ -210,7 +231,7 @@ class AIWorker:
                 return
             drafts = self.parser.parse(SimpleNamespace(**fields), profile, config)
         except AppError as error:
-            self._finish_error(job_id, error.code, config)
+            self._finish_error(job_id, error.code, config, error.fields)
             return
         except Exception:
             self._finish_error(job_id, 'AI_SERVICE_FAILED', config)
@@ -226,8 +247,9 @@ class AIWorker:
                     job.status, job.error_code = 'interrupted', 'AI_INPUT_CHANGED'
                 return
             existing = list(session.scalars(select(Candidate).where(Candidate.message_id == mail.id)))
+            warnings = [v for w in getattr(drafts, 'validation_warnings', []) if (v := safe_validation(w))]
             for candidate in existing:
-                if candidate.state == 'open' and candidate.candidate.get('parser_source') == 'ai' and not candidate.candidate.get('rule_enriched'):
+                if not warnings and candidate.state == 'open' and candidate.candidate.get('parser_source') == 'ai' and not candidate.candidate.get('rule_enriched'):
                     candidate.state = 'superseded'
             for draft in drafts:
                 # Any prior accepted/ignored action of this kind keeps authority.
@@ -247,11 +269,18 @@ class AIWorker:
                 if rules:
                     continue
                 quote = draft['evidence'][0]['quote']
-                action_key = mail.id + ':ai:' + hashlib.sha256((draft['kind'] + quote).encode()).hexdigest()
+                proof = draft['evidence'][0]
+                identity = f"{draft['kind']}:{proof['start']}:{proof['end']}:{quote}"
+                action_key = mail.id + ':ai:' + hashlib.sha256(identity.encode()).hexdigest()
                 prior = next((c for c in existing if c.action_key == action_key), None)
+                if not prior:
+                    legacy_key = mail.id + ':ai:' + hashlib.sha256((draft['kind'] + quote).encode()).hexdigest()
+                    prior = next((c for c in existing if c.action_key == legacy_key and
+                        c.candidate.get('evidence') and c.candidate['evidence'][0].get('start') == proof['start'] and
+                        c.candidate['evidence'][0].get('end') == proof['end']), None)
                 if prior:
-                    if prior.state == 'superseded':
-                        prior.state, prior.candidate = 'open', draft
+                    if prior.state == 'superseded' or prior.state == 'open' and not prior.candidate.get('rule_enriched'):
+                        prior.state, prior.candidate, prior.action_key = 'open', draft, action_key
                         prior.version += 1
                     continue
                 candidate = Candidate(message_id=mail.id, candidate=draft, action_key=action_key, state='open')
@@ -259,14 +288,15 @@ class AIWorker:
                 existing.append(candidate)
             session.flush()
             mail.state = 'review_needed' if any(c.state == 'open' for c in existing) else 'parsed'
-            mail.classification = {**mail.classification, 'ai_status': 'succeeded', 'ai_error_code': None}
+            mail.classification = {**mail.classification, 'ai_status': 'succeeded', 'ai_error_code': None,
+                                   'ai_validation': None, 'ai_warnings': warnings}
             mail.version += 1
-            job.status, job.result = 'succeeded', {'message_id': mail.id, 'suggestions': len(drafts)}
+            job.status, job.result = 'succeeded', {'message_id': mail.id, 'suggestions': len(drafts), 'validation_warnings': warnings}
             runtime = session.get(Setting, 'ai_runtime')
             if runtime:
                 runtime.value = {'failures': 0, 'paused_until': None, 'last_error_code': None}
 
-    def _finish_error(self, job_id, code, config):
+    def _finish_error(self, job_id, code, config, fields=None):
         if self.stopping.is_set() or self.db.closed or config and self.db.generation != config['generation']:
             return
         now = millis(self.clock())
@@ -282,14 +312,17 @@ class AIWorker:
                 return
             runtime = session.get(Setting, 'ai_runtime')
             value = dict(runtime.value) if runtime else {}
-            failures = value.get('failures', 0) + 1
+            validation = safe_validation(fields)
+            failures = value.get('failures', 0) + (0 if code in CONTENT_ERRORS else 1)
             if runtime:
                 runtime.value = {'failures': failures, 'last_error_code': code,
                     'auth_blocked': code in ('AI_AUTH_FAILED', 'SERVICE_AUTH_REQUIRED'),
-                    'paused_until': now + 15 * 60000 if failures >= 3 else None}
-            retry = code in TRANSIENT and job.progress.get('attempt', 0) < 1
+                    'validation': validation,
+                    'paused_until': now + 15 * 60000 if failures >= 3 and code not in CONTENT_ERRORS else None}
+            retry = code in TRANSIENT and job.progress.get('attempt', 0) < 1 and not job.progress.get('requested_by_user')
             job.status, job.error_code = ('queued' if retry else 'failed'), code
             mail.version += 1
-            mail.classification = {**mail.classification, 'ai_status': 'retry_wait' if retry else 'failed', 'ai_error_code': code}
+            mail.classification = {**mail.classification, 'ai_status': 'retry_wait' if retry else 'failed', 'ai_error_code': code,
+                                   'ai_validation': validation}
             job.progress = {**job.progress, 'attempt': job.progress.get('attempt', 0) + 1, 'retry_at': now + 60000,
-                            'mail_version': mail.version}
+                            'mail_version': mail.version, 'validation': validation}

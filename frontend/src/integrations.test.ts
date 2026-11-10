@@ -44,6 +44,11 @@ describe('AI configuration consent and credential boundaries',()=>{
  });
 });
 describe('AI status messages',()=>{
+ it('distinguishes schema failures and time conflicts without rendering service content',()=>{
+  expect(aiRuntimeMessage('AI_OUTPUT_INVALID',{reason_code:'AI_TIME_CONFLICT',field:'time'})).toContain('时间冲突');
+  expect(aiRuntimeMessage('AI_OUTPUT_INVALID',{reason_code:'AI_SCHEMA_INVALID',field:'response'})).toContain('JSON');
+  expect(aiRuntimeMessage('AI_OUTPUT_INVALID',{reason_code:'PRIVATE'})).not.toContain('PRIVATE');
+ });
  it('maps known failures to actionable Chinese while rule processing remains available',()=>{
   expect(aiSettingsError({code:'AI_AUTH_FAILED',message:'raw provider body'})).toContain('密钥');
   expect(aiSettingsError({code:'VERSION_CONFLICT'})).toContain('刷新');

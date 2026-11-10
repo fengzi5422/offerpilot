@@ -175,6 +175,145 @@ def test_auth_failure_blocks_other_queued_mail_until_config_change(tmp_path):
     assert error.value.code == 'AI_AUTH_FAILED'
 
 
+def test_invalid_mail_does_not_pause_the_whole_queue_and_keeps_safe_reason(tmp_path):
+    class Failed(Parser):
+        def parse(self, *args):
+            self.calls += 1
+            raise AppError('AI_OUTPUT_INVALID', 'private response', 503,
+                           reason_code='AI_TIME_CONFLICT', field='time')
+    parser = Failed()
+    s, _ = setup(tmp_path, parser)
+    ids = [ingest(s, f'请11月{day}日参加技术交流。') for day in range(16, 20)]
+    for _ in ids:
+        s.ai.run_once()
+    assert parser.calls == 4
+    assert not s.ai.status()['paused_until']
+    with s.db.read() as session:
+        jobs = list(session.scalars(select(Job).where(Job.kind == 'ai_parse')))
+        assert all(j.progress['validation'] == {'reason_code': 'AI_TIME_CONFLICT', 'field': 'time'} for j in jobs)
+        assert 'private response' not in str([j.progress for j in jobs])
+
+
+def test_restart_recovers_old_content_error_cooldown(tmp_path):
+    from app.ai_worker import AIWorker
+    from app.persistence import Setting
+    s, now = setup(tmp_path, Parser())
+    with s.db.tx() as session:
+        session.get(Setting, 'ai_runtime').value = {'failures': 3, 'last_error_code': 'AI_OUTPUT_INVALID',
+            'paused_until': int((now[0] + timedelta(minutes=15)).timestamp() * 1000)}
+    restarted = AIWorker(s.db, s.settings, s.integrations, s.clock, Parser())
+    assert not restarted.status()['paused_until']
+
+
+def test_connection_test_requires_real_nonempty_grounded_result(tmp_path):
+    class Empty:
+        def parse(self, *args):
+            return []
+    s, _ = setup(tmp_path, Empty())
+    with pytest.raises(AppError) as error:
+        s.ai.test()
+    assert error.value.code == 'AI_TEST_NO_EVENT'
+
+
+def test_partial_ai_result_keeps_previous_open_suggestion(tmp_path):
+    from app.ai import AIParseResult
+    class Partial(Parser):
+        def parse(self, *args):
+            if self.calls:
+                result = AIParseResult()
+                result.validation_warnings = [{'reason_code': 'AI_EVIDENCE_NOT_FOUND', 'field': 'action'}]
+                return result
+            return super().parse(*args)
+    s, _ = setup(tmp_path, Partial())
+    mid = ingest(s)
+    s.ai.run_once()
+    before = s.mail.get(mid)
+    s.ai.enqueue(mid, before['version'], force=True)
+    s.ai.run_once()
+    after = s.mail.get(mid)
+    assert [c['state'] for c in after['candidates']] == ['open']
+    assert after['classification']['ai_warnings']
+
+
+def test_partial_ai_result_updates_valid_existing_action_in_place(tmp_path):
+    from app.ai import AIParser
+    from test_ai import Transport
+    class Partial:
+        calls = 0
+        def parse(self, mail, profile, config):
+            quote = '11月16日8:30' if not self.calls else '11月17日9:30'
+            actions = [{'kind': 'interview', 'quote': '请参加技术交流。', 'time_quote': quote}]
+            if self.calls:
+                actions.append({'kind': 'materials', 'quote': '捏造的行动'})
+            self.calls += 1
+            return AIParser(Transport(actions)).parse(mail, profile, config)
+    s, _ = setup(tmp_path, Partial())
+    mid = ingest(s, '请参加技术交流。\n可选时间：11月16日8:30，11月17日9:30。')
+    s.ai.run_once()
+    before = s.mail.get(mid)
+    previous = next(c for c in before['candidates'] if c['state'] == 'open')
+    s.ai.enqueue(mid, before['version'], force=True)
+    s.ai.run_once()
+    opened = [c for c in s.mail.get(mid)['candidates'] if c['state'] == 'open']
+    assert len(opened) == 1 and opened[0]['candidate_id'] == previous['candidate_id']
+    assert opened[0]['temporal']['starts_at'] == '2026-11-17T01:30:00Z'
+
+
+def test_same_quote_at_two_positions_creates_distinct_persistent_suggestions(tmp_path):
+    from app.ai import AIParser
+    from test_ai import Transport
+    class Repeated:
+        def parse(self, mail, profile, config):
+            return AIParser(Transport([
+                {'kind': 'interview', 'quote': '面试。', 'time_quote': '十一月十六日晚上七点'},
+                {'kind': 'interview', 'quote': '面试。', 'time_quote': '十一月十七日晚上八点'},
+            ])).parse(mail, profile, config)
+    s, _ = setup(tmp_path, Repeated())
+    mid = ingest(s, '面试。时间：十一月十六日晚上七点。\n面试。时间：十一月十七日晚上八点。')
+    s.ai.run_once()
+    opened = [c for c in s.mail.get(mid)['candidates'] if c['state'] == 'open']
+    assert len(opened) == 2
+    ids = {c['candidate_id'] for c in opened}
+    s.ai.enqueue(mid, s.mail.get(mid)['version'], force=True)
+    s.ai.run_once()
+    repeated = [c for c in s.mail.get(mid)['candidates'] if c['state'] == 'open']
+    assert {c['candidate_id'] for c in repeated} == ids
+
+
+def test_manual_service_failure_finishes_promptly_without_delayed_retry(tmp_path):
+    class Failed:
+        def parse(self, *args):
+            raise AppError('SERVICE_TIMEOUT', 'timeout', 503)
+    s, _ = setup(tmp_path, Failed())
+    mid = ingest(s)
+    s.ai.run_once()
+    # A user request promotes the already queued automatic retry.
+    jid = s.ai.enqueue(mid, s.mail.get(mid)['version'], force=True)
+    s.ai.run_once()
+    assert s.jobs.get(jid)['status'] == 'failed'
+
+
+def test_manual_request_also_promotes_running_automatic_job(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def parse(self, *args):
+            entered.set()
+            assert release.wait(5)
+            raise AppError('SERVICE_TIMEOUT', 'timeout', 503)
+    s, _ = setup(tmp_path, Slow())
+    mid = ingest(s)
+    thread = threading.Thread(target=s.ai.run_once)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        jid = s.ai.enqueue(mid, s.mail.get(mid)['version'], force=True)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert s.jobs.get(jid)['status'] == 'failed'
+
+
 @pytest.mark.parametrize('action', ['disable', 'clear', 'restore', 'stop'])
 def test_dns_wait_revocation_prevents_actual_post(tmp_path, monkeypatch, action):
     """Count bytes at a real socket, not merely rejected late database writes."""
