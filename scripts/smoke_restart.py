@@ -1,5 +1,6 @@
 """Check graceful and abrupt restarts using a fresh synthetic data directory."""
 import argparse
+from contextlib import contextmanager
 import json
 from multiprocessing.connection import Client
 from pathlib import Path
@@ -26,6 +27,7 @@ def check(executable,data):
                 raise TimeoutError('Control command timed out')
             return pipe.recv()
 
+    @contextmanager
     def launch():
         nonlocal process,info
         process=subprocess.Popen([str(executable.resolve()),'--data-dir',str(data),'--headless','--no-tray'],
@@ -49,7 +51,10 @@ def check(executable,data):
         response=client.post('/api/v1/session/bootstrap',json={'code':code})
         response.raise_for_status()
         client.headers['X-CSRF-Token']=response.json()['data']['csrf_token']
-        return client
+        try:
+            yield client
+        finally:
+            client.close()
 
     def api(client,path,method='GET',body=None):
         response=client.request(method,'/api/v1'+path,**({'json':body} if method!='GET' else {}))
