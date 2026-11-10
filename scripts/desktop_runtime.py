@@ -98,6 +98,11 @@ class DesktopWindow:
             width=1200,height=820,min_size=(720,540),hidden=hidden,background_color='#faf9f5',
             text_select=True,confirm_close=False)
         self.window.events.closing+=self.on_closing
+        self.window.events.closed+=self.on_closed
+
+    def on_closed(self):
+        self.exiting=True
+        self.visible=False
 
     def on_closing(self):
         if self.keep_running and not self.exiting:
@@ -142,7 +147,7 @@ class DesktopWindow:
         require_webview2()
         self.webview.start(gui='edgechromium',private_mode=True,
             storage_path=str(Path(data_dir)/'runtime/webview'),
-            user_agent='OfferPilotDesktop/1.0.0-rc.1',localization={
+            user_agent='OfferPilotDesktop/1.0.0-rc.2',localization={
                 'global.quitConfirmation':'退出后将停止邮件同步与提醒。确定退出？',
                 'global.ok':'确定','global.cancel':'取消','global.saveFile':'保存文件',
                 'windows.fileFilter.allFiles':'所有文件'})

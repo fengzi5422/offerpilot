@@ -52,6 +52,32 @@ def test_sufficient_rules_and_disabled_never_request(tmp_path):
     assert parser.calls == 0
 
 
+def test_ai_improves_open_rule_candidate_in_place_without_duplicate_task(tmp_path):
+    class Complete:
+        def parse(self, mail, profile, config):
+            from app.ai import AIParser
+            from test_ai import Transport
+            return AIParser(Transport([{'kind': 'interview', 'quote': mail.text_excerpt,
+                'time_quote': '11月16日8:30', 'company': '示例科技'}])).parse(mail, profile, config)
+    s, _ = setup(tmp_path, Complete())
+    mid = ingest(s, '请参加面试，时间为11月16日8:30，11月17日9:30为备用场次。')
+    before = s.mail.get(mid)
+    candidate = next(c for c in before['candidates'] if c['state'] == 'open')
+    assert not candidate['temporal'].get('starts_at')
+    s.ai.enqueue(mid, before['version'], force=True)
+    s.ai.run_once()
+    opened = [c for c in s.mail.get(mid)['candidates'] if c['state'] == 'open']
+    assert len(opened) == 1
+    assert opened[0]['candidate_id'] == candidate['candidate_id']
+    assert opened[0]['temporal']['starts_at'] == '2026-11-16T00:30:00Z'
+    assert opened[0]['parser_source'] == 'ai'
+    assert s.tasks.list() == []
+    s.ai.enqueue(mid, s.mail.get(mid)['version'], force=True)
+    s.ai.run_once()
+    repeated = [c for c in s.mail.get(mid)['candidates'] if c['state'] == 'open']
+    assert len(repeated) == 1 and repeated[0]['candidate_id'] == candidate['candidate_id']
+
+
 def test_ai_suggestions_are_review_only_and_idempotent(tmp_path):
     parser = Parser()
     s, _ = setup(tmp_path, parser)
@@ -139,11 +165,14 @@ def test_auth_failure_blocks_other_queued_mail_until_config_change(tmp_path):
             raise AppError('AI_AUTH_FAILED', 'authentication failed', 503)
     parser = Bad()
     s, _ = setup(tmp_path, parser)
-    ingest(s)
+    mid = ingest(s)
     ingest(s, '请11月17日参加技术交流。')
     s.ai.run_once()
     s.ai.run_once()
     assert parser.calls == 1
+    with pytest.raises(AppError) as error:
+        s.ai.enqueue(mid, force=True)
+    assert error.value.code == 'AI_AUTH_FAILED'
 
 
 @pytest.mark.parametrize('action', ['disable', 'clear', 'restore', 'stop'])

@@ -12,6 +12,8 @@ from pathlib import Path
 import socket
 import subprocess
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import websocket
@@ -63,6 +65,68 @@ class Page:
             params.update(text='\r',unmodifiedText='\r')
         self.call('Input.dispatchKeyEvent',{'type':'keyDown',**params})
         self.call('Input.dispatchKeyEvent',{'type':'keyUp',**params})
+
+
+def check_ai(page, data):
+    """Own a synthetic model; never read or call a user's configured service."""
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            calls.append(payload)
+            time.sleep(.6)
+            source = json.loads(payload['messages'][-1]['content'])['body']
+            action = {'kind': 'interview', 'quote': '请参加面试', 'company': '示例科技',
+                'time_quote': '11月16日8:30', 'location_quote': '地点：上海市示例路200号',
+                'meeting_quote': source.splitlines()[-1]}
+            content = 'invalid' if len(calls) == 1 else '```json\n' + json.dumps({'actions': [action]}, ensure_ascii=False) + '\n```'
+            raw = json.dumps({'choices': [{'message': {'content': content}}]}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        page.click('收件识别')
+        page.wait("document.querySelector('input[type=file]')")
+        mail = ('From: hr@example.test\r\nSubject: 示例科技技术交流\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n'
+            '请参加面试，时间为11月16日8:30，11月17日9:30为备用场次。\n地点：上海市示例路200号\n会议链接：https://meet.example.test/room?token=SYNTHETIC')
+        page.js("(()=>{const input=document.querySelector('input[type=file]');const dt=new DataTransfer();"
+            f"dt.items.add(new File([{json.dumps(mail)}],'ai-synthetic.eml',{{type:'message/rfc822'}}));"
+            "input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));})()")
+        page.wait("document.querySelector('.candidate-card input[type=date]')")
+        page.js("""window.__qaAI=async(method,body)=>{
+            const session=(await(await fetch('/api/v1/session')).json()).data;
+            const response=await fetch('/api/v1/integrations/ai',{method,headers:{'X-CSRF-Token':session.csrf_token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+            if(!response.ok)throw Error('Synthetic configuration failed');return(await response.json()).data;
+        }""")
+        page.js(f"(async()=>{{const s=(await(await fetch('/api/v1/integrations/ai')).json()).data;return await window.__qaAI('PATCH',{{expected_version:s.version,changes:{{base_url:'http://127.0.0.1:{server.server_port}/v1/chat/completions',model:'synthetic',api_key:'synthetic-only',enabled:true,consent:true}}}});}})()")
+        page.click('AI 辅助识别（需启用）')
+        page.wait("document.body.innerText.includes('AI 正在') || document.body.innerText.includes('AI 已排队')")
+        page.wait("document.querySelector('.modal .error-box')?.innerText.includes('原文')")
+        page.wait("[...document.querySelectorAll('button')].some(b=>b.textContent.includes('AI 辅助识别')&&!b.disabled)")
+        page.screenshot(data/'ai-actionable-error.png')
+        page.click('AI 辅助识别（需启用）')
+        page.wait("document.body.innerText.includes('AI 识别完成')")
+        assert page.js("document.querySelector('.candidate-card input[type=date]').value") == '2026-11-16'
+        assert page.js("document.querySelector('.candidate-card input[type=time]').value") == '08:30'
+        assert page.js("[...document.querySelectorAll('.candidate-card input')].some(x=>x.value==='上海市示例路200号')")
+        assert page.js("document.querySelector('.candidate-card input[type=url]').value") == 'https://meet.example.test/room?token=SYNTHETIC'
+        assert len(calls) == 2
+        assert 'SYNTHETIC' not in json.dumps(calls)
+        page.screenshot(data/'ai-complete-prefill.png')
+        page.click('确认所选事件')
+        page.wait("!document.querySelector('.modal')")
+        print('PASS: real local model HTTP, immediate AI progress, actionable invalid-output error, retry without version conflict, grounded date/time/location/link prefill and save')
+    finally:
+        page.js("(async()=>{const s=(await(await fetch('/api/v1/integrations/ai')).json()).data;return window.__qaAI('DELETE',{expected_version:s.version});})()")
+        server.shutdown()
+        server.server_close()
+        worker.join(3)
 
 
 def check(executable,data,source=False):
@@ -167,6 +231,7 @@ def check(executable,data,source=False):
         page.wait("document.querySelector('.calendar-event')?.innerText.includes('08:45')")
         page.screenshot(data/'calendar.png')
         assert page.js('document.documentElement.scrollWidth<=innerWidth')
+        check_ai(page,data)
 
         def control(command):
             with Client(info['pipe'],family='AF_PIPE',authkey=bytes.fromhex(info['key'])) as pipe:
@@ -253,6 +318,16 @@ def check(executable,data,source=False):
         page.wait("!document.querySelector('.modal')")
         page.call('Emulation.clearDeviceMetricsOverride')
         print('PASS: WebView2 keyboard Enter/Tab/Shift-Tab/Escape, focus return, emulated 200% content scale across tasks/board/calendar/settings')
+        assert not page.js("document.querySelector('.page-heading .accent-dot')")
+        page.js('window.confirm=()=>false')
+        page.click('退出程序')
+        assert process.poll() is None
+        page.js('window.confirm=()=>true')
+        page.click('退出程序')
+        process.wait(timeout=25)
+        assert process.returncode == 0
+        assert not (data/'runtime/control.json').exists()
+        print('PASS: visible Exit cancel preserves application; confirmed Exit closes native process and releases instance')
         print('PASS: actual WebView2, bootstrap, onboarding, UI mail import, date/time prefill, reschedule, calendar, close-to-tray, second launch restores window; no external browser launched')
     except Exception:
         if page:

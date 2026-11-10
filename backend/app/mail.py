@@ -101,12 +101,34 @@ DATE_TOKENS = re.compile(DATE_RE.pattern+
 TIME_RE = re.compile(r"(?P<hour>\d{1,2})(?::|：|点)(?P<minute>\d{1,2})?分?")
 
 
+def normalize_chinese_clocks(text):
+    digits = dict(zip('零一二三四五六七八九', range(10)))
+    digits['两'] = 2
+    def number(value):
+        if value.isdigit():
+            return int(value)
+        if '十' in value:
+            left, right = value.split('十', 1)
+            return (digits.get(left, 1) if left else 1) * 10 + digits.get(right, 0)
+        return digits.get(value, -1)
+    def clock(match):
+        hour = number(match['hour'])
+        suffix = match['minute'] or ''
+        minute = {'半': 30, '一刻': 15, '三刻': 45}.get(suffix)
+        if minute is None:
+            minute = number(suffix.rstrip('分')) if suffix else 0
+        return f'{hour}:{minute:02d}'
+    return re.sub(r'(?P<hour>\d{1,2}|[零一二两三四五六七八九十]{1,3})[点时]'
+        r'(?P<minute>半|[一三]刻|(?:\d{1,2}|[零一二两三四五六七八九十]{1,3})分?)?', clock, text)
+
+
 def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=None, internal_date=None, default_event_year=2026):
     original_text=text
     # Evidence retains the complete block; incidental clocks in addresses, URLs
     # and UTC offsets must not become competing event times.
     text=re.sub(r'(?m)^\s*(?:(?:面试|笔试|测评)\s*)?(?:地点|地址|会议链接|会议地址|线上链接)\s*[:：][^\n]*', '', text)
     text=re.sub(r'https?://[^\s<>]+', '', text)
+    text=normalize_chinese_clocks(text)
     zone = "Asia/Shanghai" if re.search(r"北京时间|中国标准时间|Asia/Shanghai|(?:UTC|GMT)\+0?8(?::00)?(?![:\d])|\+08:00(?!\d)", text) else None
     if re.search(r"\bUTC\b(?!\+)|\bGMT\b(?!\+)|\bZ\b", text):
         zone = "UTC"

@@ -108,3 +108,13 @@
 实际RC1程序在新建虚构目录`.runtime/p3-keyboard-scale-rc1-final`通过：编辑弹窗Tab/Shift+Tab循环；Enter打开待办、Esc关闭、焦点返回原按钮；任务/申请/日历/设置页面等效200%内容缩放无水平溢出；该缩放下新建弹窗保存按钮可滚动到达且不被遮挡。日志`.runtime/p3-keyboard-scale-rc1-final.log`，截图`content-scale-200.png`、`dialog-scale-200.png`。使用WebView2调试协议注入键盘并模拟缩放，不代表真实OS DPI、读屏或系统文件对话框人工验收。原生操作工具两次初始化失败，报`setup refresh had errors`/`trusted Node process exited unexpectedly`，故相关项继续待验。
 
 产品源码与安装包未改动；仅增强验收脚本及文档，不重新发相同版本包。真实试用入口与最短验收步骤见[候选版试用](p3-trial.md)。
+
+## 1.0.0-rc.2 修复交付记录
+
+- 根因：同类开放规则候选挡住 AI 补全；失败后邮件版本未刷新，重试产生冲突；界面等待与错误映射不足。已按逐字原文证据补全同一候选，保留已有精确规则字段、候选身份与人工决定，重复识别不丢补全值。
+- `.runtime/p3-check-rc2.log`：387 passed、前端 65 passed，Ruff、vue-tsc/Vite 通过。最后的重复识别保护随后以 44 项 AI/退出/桌面/版本回归通过；冻结依赖及 PowerShell 构建脚本语法检查通过。
+- `.runtime/p3-desktop-ai-rc2-final.log`：最终 `dist/rc2-final/OfferPilot/OfferPilot.exe` 的实际 WebView2 窗口通过本机虚构模型 HTTP、点击即时反馈、无效输出具体错误、失败后重试、日期/时间/地点/含查询参数会议链接预填与保存；出站片段不含虚构链接令牌。标题无装饰句号。退出取消保留运行，确认后进程返回 0 并释放实例。键盘、等效 200% 内容缩放、改期/日历/托盘/恢复也通过；没有打开外部浏览器。
+- `.runtime/p3-restart-rc2.log`：RC2 较早构建正常和异常停止后重开，事件及提醒身份保留；最终仅再修正候选重复补全，不修改持久化结构。
+- 最终 PyInstaller 和 Inno 构建成功；归档安装器、完整 ZIP、SHA256 与源码提交。构建脚本改用全新目录，避免清理用户正在运行的程序。
+- 新入口 `output/p3-trial-rc2/OfferPilot-修复版.lnk` 明确继续 `.runtime/p3-user-trial-rc1`；由用户先退出旧版再打开，不擅自关闭用户进程，不迁移/清空真实数据。普通 X 仍隐藏至托盘，右上角“退出程序”可结束本实例。
+- 真实模型未重新调用或上传用户正文。外部正式发布准入仍待记录，版本保留 RC2 标识。

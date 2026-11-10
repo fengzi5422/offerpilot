@@ -101,12 +101,22 @@ def main():
             if desktop:
                 desktop.open()
 
+        stopping = threading.Event()
+        stop_lock = threading.Lock()
         def stop(*_):
+            with stop_lock:
+                if stopping.is_set():
+                    return
+                stopping.set()
             server.should_exit = True
-            if tray:
-                tray.stop()
-            if desktop:
-                desktop.quit()
+            try:
+                if desktop:
+                    desktop.quit()
+            finally:
+                if tray:
+                    tray.stop()
+
+        app.state.shutdown_callback = stop
 
         if sys.platform == 'win32':
             pipe = r'\\.\pipe\OfferPilot-' + hashlib.sha256(str(data).encode()).hexdigest()[:24]
@@ -123,7 +133,7 @@ def main():
                                 open_ui()
                                 connection.send({'opened':bool(desktop)})
                             elif command == 'get_status':
-                                connection.send({'version':'1.0.0-rc.1','ui':'desktop' if desktop else 'headless',
+                                connection.send({'version':'1.0.0-rc.2','ui':'desktop' if desktop else 'headless',
                                                  'visible':desktop.visible if desktop else False})
                             elif command == 'close_ui':
                                 if desktop:

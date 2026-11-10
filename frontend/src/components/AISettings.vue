@@ -44,12 +44,12 @@ async function remove(){
 }
 async function test(){
  if(!canTest.value)return;
- operation.value='test';error.value='';message.value='';
+ operation.value='test';error.value='';message.value='正在用固定示例测试 AI 服务，通常需要几秒到半分钟，请稍候…';
  try{
   const result=await request<{status:string}>('/integrations/ai/test','POST',{});
   if(result.status!=='validated')throw new Error();
   message.value='固定示例连接测试通过，服务返回了可校验的建议。本次没有发送你的真实邮件；实际邮件的处理结果仍需审核。';
- }catch(e){error.value=aiSettingsError(e);}finally{operation.value='';}
+ }catch(e){message.value='';error.value=aiSettingsError(e);}finally{operation.value='';}
 }
 onMounted(load);
 </script>

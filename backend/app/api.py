@@ -2,6 +2,7 @@ import base64
 import binascii
 import hashlib
 import json
+import threading
 from uuid import UUID
 
 from fastapi import BackgroundTasks, File, Request, UploadFile
@@ -20,6 +21,8 @@ from app.version import VERSION
 def install_routes(app):
     s = app.state.services
     db, clock, sessions = s.db, s.clock, app.state.sessions
+    exit_lock = threading.Lock()
+    exit_requested = False
 
     def respond(request, value, status=200):
         return JSONResponse({"data": value, "request_id": request.state.request_id}, status_code=status)
@@ -83,6 +86,18 @@ def install_routes(app):
     @app.get("/api/v1/session")
     def get_session(request: Request):
         return respond(request, {key: request.state.session[key] for key in ("csrf_token", "expires_at")})
+
+    @app.post('/api/v1/app/exit')
+    def exit_app(request: Request, background_tasks: BackgroundTasks):
+        nonlocal exit_requested
+        callback = getattr(app.state, 'shutdown_callback', None)
+        if callback is None:
+            raise AppError('DESKTOP_EXIT_UNAVAILABLE', '此运行方式请从 OfferPilot 托盘选择退出', 409)
+        with exit_lock:
+            if not exit_requested:
+                exit_requested = True
+                background_tasks.add_task(callback)
+        return respond(request, {'status': 'stopping'}, 202)
 
     @app.get("/api/v1/tasks")
     def list_tasks(request: Request, view: str | None = None, status: str | None = None):

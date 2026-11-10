@@ -1,3 +1,6 @@
+#ifndef ProgramSource
+#define ProgramSource "..\dist\OfferPilot"
+#endif
 [Setup]
 #ifdef IsolatedQA
 AppId=OfferPilot.Lite.IsolatedQA
@@ -5,7 +8,7 @@ AppId=OfferPilot.Lite.IsolatedQA
 AppId=OfferPilot.Lite
 #endif
 AppName=OfferPilot Lite
-AppVersion=1.0.0-rc.1
+AppVersion=1.0.0-rc.2
 DefaultDirName={localappdata}\Programs\OfferPilot
 DefaultGroupName=OfferPilot
 PrivilegesRequired=lowest
@@ -27,7 +30,7 @@ RestartApplications=no
 CloseApplicationsFilter=OfferPilot.exe
 
 [Files]
-Source: "..\dist\OfferPilot\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#ProgramSource}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 #ifndef IsolatedQA
 [Icons]

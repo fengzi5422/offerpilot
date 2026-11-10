@@ -76,7 +76,7 @@ onMounted(load);
 <template>
  <section class="page applications-page">
   <div class="page-eyebrow"><span class="tiny-line"/>每一份申请，都有自己的下一步</div>
-  <div class="page-heading"><div><h1>看见求职的进展<span class="accent-dot">。</span></h1><p>按公司与岗位整理申请，阶段由你亲自决定。</p></div><button class="button primary" @click="open()"><Icon name="plus" :size="18"/>新建申请</button></div>
+  <div class="page-heading"><div><h1>看见求职的进展</h1><p>按公司与岗位整理申请，阶段由你亲自决定。</p></div><button class="button primary" @click="open()"><Icon name="plus" :size="18"/>新建申请</button></div>
   <div class="application-summary" aria-label="申请概览"><div><strong>{{active}}</strong><span>进行中的申请</span></div><div><strong>{{applications.filter(item=>item.stage==='offer').length}}</strong><span>份录用通知</span></div><p>同一家公司，不同岗位各自记录。<br>任务关联可以调整，提醒时间继续保留。</p></div>
   <div class="section-toolbar board-toolbar"><label class="board-search">查找申请<input v-model="search" type="search" placeholder="公司或岗位名称"/></label><button class="text-button" :disabled="loading" @click="load">刷新申请</button></div>
   <p v-if="error" class="error-box" role="alert">{{error}}</p>

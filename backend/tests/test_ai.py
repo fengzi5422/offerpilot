@@ -93,3 +93,53 @@ def test_ambiguous_date_remains_review_and_prompt_is_data():
     payload = transport.calls[0][1]
     assert 'tools' not in payload and payload['messages'][1]['role'] == 'user'
     assert '文件删除' in payload['messages'][1]['content']
+
+
+def test_json_fence_is_accepted_without_relaxing_evidence():
+    from app.ai import AIParser
+    action = {'kind': 'interview', 'quote': source().text_excerpt, 'company': '示例科技'}
+    content = '```json\n' + json.dumps({'actions': [action]}, ensure_ascii=False) + '\n```'
+    raw = json.dumps({'choices': [{'message': {'content': content}}]}).encode()
+    assert AIParser(Transport(raw=raw)).parse(source(), {}, config())[0]['temporal']['starts_at']
+
+
+def test_ai_prefills_separate_grounded_time_location_and_private_link():
+    from app.ai import AIParser, redact
+    mail = source('欢迎参加技术交流。\n安排：11月16日8:30-9:30\n地点：上海市示例路100号\n会议链接：https://meet.example/room?token=PRIVATE_TOKEN')
+    redacted, _ = redact(mail.text_excerpt)
+    action = {'kind': 'interview', 'quote': '欢迎参加技术交流。', 'company': '示例科技',
+        'time_quote': '安排：11月16日8:30-9:30', 'location_quote': '地点：上海市示例路100号',
+        'meeting_quote': redacted.splitlines()[-1]}
+    transport = Transport([action])
+    draft = AIParser(transport).parse(mail, {}, config())[0]
+    assert draft['temporal']['starts_at'] == '2026-11-16T00:30:00Z'
+    assert draft['temporal']['ends_at'] == '2026-11-16T01:30:00Z'
+    assert draft['event_details'] == {'location': '上海市示例路100号', 'meeting_url': 'https://meet.example/room?token=PRIVATE_TOKEN'}
+    assert 'PRIVATE_TOKEN' not in json.dumps(transport.calls[0][1])
+    assert {e['field'] for e in draft['evidence']} >= {'action', 'time', 'location', 'meeting_url'}
+
+
+def test_complete_endpoint_not_appended_twice_and_incomplete_output_is_actionable():
+    from app.ai import AIParser
+    transport = Transport()
+    AIParser(transport).parse(source(), {}, {**config(), 'base_url': 'https://model.example/v1/chat/completions'})
+    assert transport.calls[0][0] == 'https://model.example/v1/chat/completions'
+    raw = json.dumps({'choices': [{'finish_reason': 'length', 'message': {'content': ''}}]}).encode()
+    with pytest.raises(AppError) as error:
+        AIParser(Transport(raw=raw)).parse(source(), {}, config())
+    assert error.value.code == 'AI_OUTPUT_INCOMPLETE'
+
+
+def test_invented_field_evidence_is_rejected():
+    from app.ai import AIParser
+    with pytest.raises(AppError) as error:
+        AIParser(Transport([{'kind': 'interview', 'quote': source().text_excerpt, 'location_quote': '地点：虚构地址'}])).parse(source(), {}, config())
+    assert error.value.code == 'AI_OUTPUT_INVALID'
+
+
+@pytest.mark.parametrize(('clock', 'expected'), [('上午9点半', '01:30'), ('下午两点一刻', '06:15'), ('上午十二点', '04:00')])
+def test_grounded_chinese_clock_prefills_correct_minutes(clock, expected):
+    from app.ai import AIParser
+    mail = source('请11月16日' + clock + '参加技术交流。')
+    draft = AIParser(Transport([{'kind': 'interview', 'quote': mail.text_excerpt}])).parse(mail, {}, config())[0]
+    assert draft['temporal']['starts_at'] == '2026-11-16T' + expected + ':00Z'

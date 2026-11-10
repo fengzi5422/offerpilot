@@ -13,6 +13,29 @@ from app.persistence import Candidate, Email, Job, Setting, check_version, get_r
 TRANSIENT = {'AI_RATE_LIMITED', 'AI_SERVICE_FAILED', 'SERVICE_TIMEOUT', 'SERVICE_NETWORK_ERROR'}
 
 
+def enrich_open_candidate(old, suggestion):
+    """Fill missing fields on the same reviewed action; keep precise rule values."""
+    merged = {**old}
+    previous, proposed = old['temporal'], suggestion['temporal']
+    precise = previous.get('precision') == 'minute' and not previous.get('needs_confirmation')
+    if not precise and (proposed.get('starts_at') or proposed.get('due_at') or proposed.get('local_date')):
+        merged['temporal'] = proposed
+    merged['event_details'] = {key: old.get('event_details', {}).get(key) or suggestion.get('event_details', {}).get(key, '')
+        for key in ('location', 'meeting_url')}
+    if not old.get('company') and suggestion.get('company'):
+        merged['company'], merged['title'] = suggestion['company'], suggestion['title']
+    if all(merged.get(key) == old.get(key) for key in ('temporal', 'event_details', 'company', 'title')):
+        return None
+    merged['parser_source'] = 'ai'
+    merged['rule_enriched'] = True
+    reasons = set(previous.get('reason_codes', []))
+    merged['issues'] = list(dict.fromkeys(['AI_REQUIRES_REVIEW',
+        *[issue for issue in old.get('issues', []) if issue not in reasons and not (issue == 'COMPANY_MISSING' and merged.get('company'))],
+        *merged['temporal'].get('reason_codes', [])]))
+    merged['evidence'] = old.get('evidence', []) + suggestion.get('evidence', [])
+    return merged
+
+
 class AIWorker:
     def __init__(self, db, settings, integrations, clock, parser=None):
         self.db, self.settings, self.integrations, self.clock = db, settings, integrations, clock
@@ -84,6 +107,13 @@ class AIWorker:
                 if force:
                     raise AppError('SOURCE_UNAVAILABLE', '原文已清理或忽略，请重新导入邮件后识别', 409)
                 return None
+            runtime = session.get(Setting, 'ai_runtime')
+            if runtime and runtime.value.get('auth_blocked'):
+                if force:
+                    raise AppError('AI_AUTH_FAILED', 'AI 认证或额度不可用，请在设置中更新配置后再识别', 409)
+                return None
+            if force and runtime and (runtime.value.get('paused_until') or 0) > millis(self.clock()):
+                raise AppError('AI_COOLDOWN', 'AI 连续失败后已暂时暂停，请先检查服务配置，或稍后重试', 409)
             if not force and mail.classification.get('relevance') == 'non_recruitment':
                 return None
             candidates = list(session.scalars(select(Candidate).where(Candidate.message_id == message_id)))
@@ -147,6 +177,7 @@ class AIWorker:
             profile, mail_version = self.settings.get(session), mail.version
             profile_version = profile['version']
             job.status = 'running'
+            mail.classification = {**mail.classification, 'ai_status': 'running', 'ai_error_code': None}
         @contextmanager
         def dispatch_guard():
             # Hold the dispatch gate only during request writing, never response waiting.
@@ -181,14 +212,24 @@ class AIWorker:
                 return
             existing = list(session.scalars(select(Candidate).where(Candidate.message_id == mail.id)))
             for candidate in existing:
-                if candidate.state == 'open' and candidate.candidate.get('parser_source') == 'ai':
+                if candidate.state == 'open' and candidate.candidate.get('parser_source') == 'ai' and not candidate.candidate.get('rule_enriched'):
                     candidate.state = 'superseded'
             for draft in drafts:
                 # Any prior accepted/ignored action of this kind keeps authority.
                 if any(c.state in ('accepted', 'ignored') and c.candidate.get('kind') == draft['kind'] for c in existing):
                     continue
-                if any(c.state == 'open' and c.candidate.get('kind') == draft['kind'] and
-                        c.candidate.get('parser_source') != 'ai' for c in existing):
+                rules = [c for c in existing if c.state == 'open' and c.candidate.get('kind') == draft['kind'] and
+                    (c.candidate.get('parser_source') != 'ai' or c.candidate.get('rule_enriched'))]
+                matching = [c for c in rules if any(a.get('start', 0) < b.get('end', 0) and a.get('end', 0) > b.get('start', 0)
+                    for a in c.candidate.get('evidence', []) for b in draft.get('evidence', []))]
+                if len(matching) == 1:
+                    candidate = matching[0]
+                    enriched = enrich_open_candidate(candidate.candidate, draft)
+                    if enriched:
+                        candidate.candidate = enriched
+                        candidate.version += 1
+                    continue
+                if rules:
                     continue
                 quote = draft['evidence'][0]['quote']
                 action_key = mail.id + ':ai:' + hashlib.sha256((draft['kind'] + quote).encode()).hexdigest()
