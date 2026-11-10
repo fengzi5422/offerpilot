@@ -6,11 +6,13 @@ from sqlalchemy import select
 
 from app.domain import AppError, TaskInput, iso, millis, validated
 from app.persistence import Application, Reminder, Setting, Task, audit, check_version, get_record
+from app.temporal_order import event_order
 
 DEFAULT_SETTINGS = {
     "timezone": "Asia/Shanghai", "onboarding_completed": False, "notifications_enabled": True,
     "sync_interval_seconds": 180, "quiet_hours": {"enabled": False, "start": "22:00", "end": "08:00"},
     "autostart_enabled": False,
+    "default_event_year": 2026,
     "notification_privacy": "generic",
 }
 OFFSETS = {"interview": [86400, 3600, 900], "written_exam": [86400, 3600, 900],
@@ -45,6 +47,8 @@ class SettingsService:
             merged["reminder_offsets_seconds"] = {**current["reminder_offsets_seconds"], **supplied}
         try:
             ZoneInfo(merged["timezone"])
+            if type(merged['default_event_year']) is not int or not 2000 <= merged['default_event_year'] <= 2099:
+                raise ValueError()
             if merged["notification_privacy"] not in ("generic", "details"):
                 raise ValueError()
             for key in ("onboarding_completed", "notifications_enabled", "autostart_enabled"):
@@ -214,8 +218,10 @@ class TaskService:
                 if status != "all":
                     query = query.where(Task.status == status)
             items = [self.serialize(t, session) for t in session.scalars(query)]
+        profile=self.settings.get()
+        items.sort(key=lambda task:(*event_order(task['temporal'],profile['timezone']),task['created_at'],task['id']))
         now = self.clock()
-        zone = ZoneInfo(self.settings.get()["timezone"])
+        zone = ZoneInfo(profile["timezone"])
         today = now.astimezone(zone).date()
         if view in ("today", "week", "overdue", "upcoming"):
             filtered = []

@@ -98,6 +98,7 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
 
     @asynccontextmanager
     async def lifespan(_):
+        mail.upgrade_year_defaults(data_tools.year_policy_checkpoint)
         reminders.recover()
         if start_workers:
             for name, callback, interval in (("reminders", reminders.run_once, 15), ("mail", accounts.tick, 30),
@@ -117,7 +118,7 @@ def create_app(data_dir, *, origin="http://127.0.0.1:8765", bootstrap_code=None,
         handler.close()
         logger.removeHandler(handler)
 
-    app = FastAPI(title="OfferPilot", version="0.2.1", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="OfferPilot", version="0.2.2", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.data_dir, app.state.bootstrap_code, app.state.sessions = data_dir, sessions.initial_code, sessions
     app.state.services = SimpleNamespace(db=db, settings=settings, tasks=tasks, reminders=reminders, mail=mail,
                                         accounts=accounts, jobs=jobs, data_tools=data_tools, clock=clock,

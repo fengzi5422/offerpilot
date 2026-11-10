@@ -168,6 +168,17 @@ class DataTools:
             self.db.log("backup.complete", module="backup")
             return {"filename": name, "created_at": iso(self.clock())}
 
+    def year_policy_checkpoint(self):
+        """Keep a sanitized recovery point before updating untouched year suggestions."""
+        target=self.rollback_dir/('before-year-policy-'+uid()+'.zip')
+        partial=target.with_suffix('.partial')
+        try:
+            partial.write_bytes(self._backup_content(True))
+            os.replace(partial,target)
+        finally:
+            partial.unlink(missing_ok=True)
+        return target
+
     def _backup_content(self, include_evidence=False):
         stage = self.staging_dir / (uid() + ".sqlite")
         try:
@@ -205,7 +216,7 @@ class DataTools:
                 counts = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                           for table in ("tasks", "applications", "email_messages", "mail_accounts")}
             content = stage.read_bytes()
-            manifest = {"format_version": 1, "app_version": "0.2.1", "schema_revision": SCHEMA_REVISION,
+            manifest = {"format_version": 1, "app_version": "0.2.2", "schema_revision": SCHEMA_REVISION,
                         "created_at": iso(self.clock()), "files": [{"name": "data.sqlite", "size": len(content),
                         "sha256": digest(content)}], "record_counts": counts, "contains_evidence": bool(include_evidence),
                         "credentials_included": False}

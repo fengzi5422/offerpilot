@@ -11,9 +11,9 @@ from test_core import eml, import_mail, task_body
 @pytest.mark.parametrize("text,kind,confirm,precision", [
     ("2030年1月2日15:00（北京时间）", "interview", False, "minute"),
     ("2030-01-02 15:00 UTC", "interview", False, "minute"),
-    ("2030年1月2日15:00", "interview", True, "minute"),
+    ("2030年1月2日15:00", "interview", False, "minute"),
     ("2030年1月2日前", "materials", True, "date"),
-    ("1月2日15:00 北京时间", "interview", True, "unknown"),
+    ("1月2日15:00 北京时间", "interview", False, "minute"),
     ("收到后48小时", "assessment", True, "unknown"),
     ("48小时内", "assessment", True, "unknown"),
     ("明天15:00", "materials", True, "unknown"),
@@ -142,7 +142,7 @@ def test_invalid_dst_time_is_rejected(client):
 
 @pytest.mark.parametrize("text,subject,task_count,review", [
     ("请于2030年1月2日15:00（北京时间）参加面试。", "示例科技面试", 1, False),
-    ("请于2030年1月2日15:00参加面试。", "示例科技面试", 0, True),
+    ("请于2030年1月2日15:00参加面试。", "示例科技面试", 1, False),
     ("请在2030年1月2日前上传材料。", "示例科技材料", 0, True),
     ("收到后48小时内完成测评。", "示例科技测评", 0, True),
     ("请于11月12日前上传材料。", "示例科技材料", 0, True),

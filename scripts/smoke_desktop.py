@@ -94,12 +94,14 @@ def check(executable,data,source=False):
         page.wait("document.body.innerText.includes('求职路上')")
         page.click('先体验待办')
         page.wait("!document.querySelector('.modal') && document.querySelector('.desktop')")
-        assert page.js("navigator.userAgent.includes('OfferPilotDesktop/0.2.1')")
+        assert page.js("navigator.userAgent.includes('OfferPilotDesktop/0.2.2')")
+        page.click('设置与诊断')
+        page.wait("document.querySelector('input[type=number]')?.value==='2026'")
         page.click('收件识别')
         page.wait("document.querySelector('input[type=file]')!==null")
         mail=('From: hr@example.test\r\nSubject: 示例科技面试安排\r\n'
               'Content-Type: text/plain; charset=utf-8\r\n\r\n'
-              '面试安排如下：\n面试时间：2050年1月2日15:00-16:00（北京时间）\n'
+              '面试安排如下：\n1、面试签到时间：11月16日（周一）8:30-9:30\n'
               '面试地点：上海市示例路100号\n会议链接：https://meet.example.test/room')
         page.js("(()=>{const input=document.querySelector('input[type=file]');const dt=new DataTransfer();"
                 f"dt.items.add(new File([{json.dumps(mail)}],'synthetic.eml',{{type:'message/rfc822'}}));"
@@ -109,18 +111,18 @@ def check(executable,data,source=False):
         page.wait("document.querySelector('.modal-head')?.innerText.includes('编辑事件')")
         # Select the last dialog explicitly: review and editor are sibling backdrops.
         values=page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=date]').value")
-        assert values=='2050-01-02',values
-        assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]').value")=='15:00'
+        assert values=='2026-11-16',values
+        assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]').value")=='08:30'
         assert page.js("[...document.querySelectorAll('.modal-backdrop')].at(-1).innerText.includes('地点')")
         page.screenshot(data/'event-editor.png')
         # Confirm uses a native dialog in production; accept only this synthetic test's reschedule.
-        page.js("window.confirm=()=>true;(()=>{const input=[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]');input.value='15:30';input.dispatchEvent(new Event('input',{bubbles:true}));})()")
+        page.js("window.confirm=()=>true;(()=>{const input=[...document.querySelectorAll('.modal-backdrop')].at(-1).querySelector('input[type=time]');input.value='08:45';input.dispatchEvent(new Event('input',{bubbles:true}));})()")
         page.click('保存修改')
         page.wait("!document.querySelector('.modal')")
         page.click('事件日历')
         page.wait("document.querySelector('.calendar-jump input') && !document.querySelector('.calendar-jump input').disabled")
-        page.js("(()=>{const input=document.querySelector('.calendar-jump input');input.value='2050-01-02';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));})()")
-        page.wait("document.querySelector('.calendar-event')?.innerText.includes('15:30')")
+        page.js("(()=>{const input=document.querySelector('.calendar-jump input');input.value='2026-11-16';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));})()")
+        page.wait("document.querySelector('.calendar-event')?.innerText.includes('08:45')")
         page.screenshot(data/'calendar.png')
         assert page.js('document.documentElement.scrollWidth<=innerWidth')
 
@@ -130,7 +132,7 @@ def check(executable,data,source=False):
                 assert pipe.poll(20)
                 return pipe.recv()
 
-        assert control('get_status')=={'version':'0.2.1','ui':'desktop','visible':True}
+        assert control('get_status')=={'version':'0.2.2','ui':'desktop','visible':True}
         page.js('window.__qaRetained=true')
         second=subprocess.run(command,env=env,creationflags=subprocess.CREATE_NO_WINDOW,timeout=35)
         assert second.returncode==0

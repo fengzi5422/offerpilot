@@ -74,7 +74,7 @@ class Temporal(BaseModel):
         if self.precision == "minute" and not (self.due_at or self.starts_at):
             raise ValueError("精确时间需要截止或开始时刻")
         if not self.needs_confirmation and self.precision == "minute":
-            if self.timezone_source not in ("explicit", "user_confirmed"):
+            if self.timezone_source not in ("explicit", "user_confirmed", "account_default"):
                 raise ValueError("未确认时区不能自动排程")
         if self.precision == "unknown":
             self.needs_confirmation = True

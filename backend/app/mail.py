@@ -14,7 +14,8 @@ from sqlalchemy import select
 
 from app.domain import AppError, Temporal, iso, millis, validated
 from app.event_parser import action_blocks
-from app.persistence import Candidate, Email, MailCache, Occurrence, audit, check_version, get_record
+from app.temporal_order import event_order
+from app.persistence import Candidate, Email, MailCache, Occurrence, Task, audit, check_version, get_record
 
 MAX_EML_BYTES = 10 * 1024 * 1024
 MAX_TEXT_BYTES = 256 * 1024
@@ -93,30 +94,40 @@ def normalize_mail(raw):
             "text_truncated": truncated, "canonical_digest": digest, "links": links, "attachments": attachments}
 
 
-DATE_RE = re.compile(r"(?P<year>20\d{2})[年/.-](?P<month>\d{1,2})[月/.-](?P<day>\d{1,2})日?")
+DATE_RE = re.compile(r"(?<!\d)(?P<year>20\d{2})[年/.-](?P<month>\d{1,2})[月/.-](?P<day>\d{1,2})(?!\d)日?")
+DATE_TOKENS = re.compile(DATE_RE.pattern+
+    r'|(?<![\d年/.-])(?P<cm>\d{1,2})月(?P<cd>\d{1,2})(?!\d)日?'
+    r'|(?<![\d年/.:：-])(?P<nm>\d{1,2})[/.-](?P<nd>\d{1,2})(?![\d:：])日?')
 TIME_RE = re.compile(r"(?P<hour>\d{1,2})(?::|：|点)(?P<minute>\d{1,2})?分?")
 
 
-def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=None, internal_date=None):
+def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=None, internal_date=None, default_event_year=2026):
     original_text=text
     # Evidence retains the complete block; incidental clocks in addresses, URLs
     # and UTC offsets must not become competing event times.
     text=re.sub(r'(?m)^\s*(?:(?:面试|笔试|测评)\s*)?(?:地点|地址|会议链接|会议地址|线上链接)\s*[:：][^\n]*', '', text)
     text=re.sub(r'https?://[^\s<>]+', '', text)
-    zone = "Asia/Shanghai" if re.search(r"北京时间|中国标准时间|Asia/Shanghai|UTC\+0?8(?::00)?|\+08:00", text) else None
+    zone = "Asia/Shanghai" if re.search(r"北京时间|中国标准时间|Asia/Shanghai|(?:UTC|GMT)\+0?8(?::00)?(?![:\d])|\+08:00(?!\d)", text) else None
     if re.search(r"\bUTC\b(?!\+)|\bGMT\b(?!\+)|\bZ\b", text):
         zone = "UTC"
     value = {"kind": "unknown", "raw_text": original_text[:4096], "timezone": zone or default_timezone,
              "timezone_source": "explicit" if zone else "account_default", "precision": "unknown",
              "needs_confirmation": True, "reason_codes": []}
-    text=re.sub(r'(?:UTC|GMT)\+0?8(?::00)?|\+08:00', '', text)
+    text=re.sub(r'(?:UTC|GMT)\+0?8(?::00)?(?![:\d])|\+08:00(?!\d)', '', text)
+    # One token pass protects explicit years and also handles mixed explicit/omitted years.
+    text=DATE_TOKENS.sub(lambda match:match.group() if match['year'] else
+        f"{default_event_year}年{match['cm'] or match['nm']}月{match['cd'] or match['nd']}日",text)
     dates, times = list(DATE_RE.finditer(text)), list(TIME_RE.finditer(text))
+    if len(dates)==1 and re.search(r'(?:或(?:者)?|、|至|到|和|及|[-—～~])\s*\d+日',text[dates[0].end():]):
+        value['reason_codes']=['MULTIPLE_TIMES']
+        return Temporal.model_validate(value).public()
     if len(dates)==1 and len(times)==2 and re.fullmatch(r'\s*[-—–~～至到]\s*', text[times[0].end():times[1].start()]):
         if kind not in ('interview','written_exam'):
             value['reason_codes']=['MULTIPLE_TIMES']
             return Temporal.model_validate(value).public()
         start_text=text[:times[1].start()]+text[times[1].end():]
-        result=parse_temporal(start_text,kind,default_timezone,header_date,internal_date)
+        result=parse_temporal(start_text,kind,default_timezone,header_date,internal_date,default_event_year)
+        result['raw_text']=original_text[:4096]
         if result.get('starts_at'):
             try:
                 start=datetime.fromisoformat(result['starts_at']).astimezone(ZoneInfo(result['timezone']))
@@ -150,10 +161,14 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
                 if local.astimezone(timezone.utc).astimezone(local.tzinfo).replace(tzinfo=None) != local.replace(tzinfo=None):
                     raise ValueError()
                 ambiguous = local.replace(fold=0).utcoffset() != local.replace(fold=1).utcoffset()
-                value.update(kind="absolute", precision="minute", needs_confirmation=not bool(zone) or ambiguous)
+                unclear_zone=bool(re.search(r'\b(?:CST|EST|EDT|PST|PDT|MST|MDT|CET|CEST|JST|IST)\b'
+                    r'|(?:UTC|GMT)\s*[+-]\s*\d|(?<!\d)[+-]\d{2}:?\d{2}\b'
+                    r'|(?:美东|美西|东京|日本|伦敦|纽约|(?:美国)?(?:东部|西部|太平洋))(?:标准|夏令)?时间'
+                    r'|\b(?!Asia/Shanghai\b)[A-Za-z_]+/[A-Za-z_]+\b',text,re.I))
+                value.update(kind="absolute", precision="minute", needs_confirmation=ambiguous or unclear_zone)
+                if unclear_zone:
+                    value['reason_codes'].append('TIMEZONE_UNCONFIRMED')
                 value["starts_at" if kind in ("interview", "written_exam") else "due_at"] = iso(local)
-                if not zone:
-                    value["reason_codes"].append("TIMEZONE_UNCONFIRMED")
                 if ambiguous:
                     value["reason_codes"].append("AMBIGUOUS_LOCAL_TIME")
             else:
@@ -197,30 +212,10 @@ def parse_temporal(text, kind, default_timezone="Asia/Shanghai", header_date=Non
             value["candidates"] = [candidate]
     else:
         value["reason_codes"].append("YEAR_OR_DATE_MISSING")
-        partial = re.search(r"(\d{1,2})月(\d{1,2})日?", text)
-        if partial and header_date:
-            reference = datetime.fromisoformat(header_date).astimezone(ZoneInfo(zone or default_timezone))
-            candidates = []
-            for year in (reference.year, reference.year + 1):
-                try:
-                    day = datetime(year, int(partial[1]), int(partial[2])).date()
-                    candidate={"reference_kind": "message_date", "reference_at": header_date,
-                               "local_date": str(day), "reason": "年份需要确认"}
-                    if len(times)==1:
-                        hour=int(times[0]['hour'])
-                        if re.search(r'下午|晚上',text) and hour<12:
-                            hour+=12
-                        local=datetime(year,int(partial[1]),int(partial[2]),hour,
-                            int(times[0]['minute'] or 0),tzinfo=ZoneInfo(zone or default_timezone))
-                        candidate['starts_at' if kind in ('interview','written_exam') else 'due_at']=iso(local)
-                    candidates.append(candidate)
-                except ValueError:
-                    continue
-            value["candidates"] = candidates
     return Temporal.model_validate(value).public()
 
 
-def classify_and_parse(mail, default_timezone):
+def classify_and_parse(mail, default_timezone, default_event_year=2026):
     text, subject = mail.text_excerpt, mail.subject
     combined = subject + "\n" + text
     changed = bool(re.search(r"改期|取消|延期|重新安排|reschedul|cancel", combined, re.I))
@@ -238,7 +233,7 @@ def classify_and_parse(mail, default_timezone):
         # Bare salutations/subject repeats are not independent actions.
         if not re.search(r"\d|请|安排|参加|提交|上传|完成|截止|改期|取消|明天|后天|周|邀请|schedule|complete", segment, re.I):
             continue
-        temporal = parse_temporal(segment, kind, default_timezone, mail.header_date, mail.internal_date)
+        temporal = parse_temporal(segment, kind, default_timezone, mail.header_date, mail.internal_date,default_event_year)
         issues = list(temporal["reason_codes"])
         if changed:
             issues.append("CHANGE_REQUIRES_REVIEW")
@@ -261,8 +256,9 @@ def classify_and_parse(mail, default_timezone):
     if changed and not candidates:
         candidates.append({"title": "审核招聘安排变更", "kind": "custom", "priority": 2,
                            "temporal": Temporal().public(), "issues": ["CHANGE_REQUIRES_REVIEW"], "evidence": []})
+    candidates.sort(key=lambda candidate:event_order(candidate['temporal'],default_timezone))
     classification = {"relevance": "recruitment" if candidates else "uncertain",
-                      "categories": sorted({c["kind"] for c in candidates}), "rule_version": "rules-v2"}
+                      "categories": sorted({c["kind"] for c in candidates}), "rule_version": "rules-v3"}
     if not candidates and re.search(r"已收到.*申请|申请.*收到|application.*received|感谢.*投递", combined, re.I):
         classification.update(relevance="recruitment", categories=["application_received"])
     elif not candidates and re.search(r"促销|优惠券|退订|sale|unsubscribe", combined, re.I):
@@ -274,6 +270,51 @@ class MailService:
     def __init__(self, db, tasks, settings, clock):
         self.db, self.tasks, self.settings, self.clock = db, tasks, settings, clock
         self.parse_lock = threading.Lock()
+
+    def upgrade_year_defaults(self,checkpoint):
+        """Upgrade untouched legacy suggestions only; user decisions remain authoritative."""
+        updates=[]
+        with self.db.read() as session:
+            profile=self.settings.get(session)
+            for candidate in session.scalars(select(Candidate).where(Candidate.state=='open',Candidate.task_id.is_(None))):
+                draft=candidate.candidate
+                original=draft.get('temporal',{})
+                if 'YEAR_OR_DATE_MISSING' not in original.get('reason_codes',[]):
+                    continue
+                if DATE_RE.search(original.get('raw_text','')):
+                    continue
+                temporal=parse_temporal(original.get('raw_text',''),draft['kind'],
+                    original.get('timezone') or profile['timezone'],default_event_year=profile['default_event_year'])
+                if temporal['kind'] not in ('absolute','date_only'):
+                    continue
+                issues=[issue for issue in draft.get('issues',[]) if issue not in original.get('reason_codes',[])]
+                updates.append((candidate.id,candidate.version,{**draft,'event_details':draft.get('event_details',{}),'temporal':temporal,
+                    'issues':list(dict.fromkeys(issues+temporal['reason_codes']))}))
+        if not updates:
+            return 0
+        checkpoint()
+        with self.db.tx() as session:
+            messages=set()
+            for candidate_id,version,draft in updates:
+                candidate=get_record(session,Candidate,candidate_id)
+                check_version(candidate,version)
+                candidate.candidate=draft
+                candidate.version+=1
+                mail=get_record(session,Email,candidate.message_id)
+                messages.add(mail.id)
+                if not draft['issues'] and not draft['temporal']['needs_confirmation']:
+                    task=self.tasks.create({key:draft[key] for key in ('title','kind','priority','temporal','event_details')},
+                        session=session,source={'message_id':mail.id,'subject':mail.subject,'evidence':draft.get('evidence',[])},
+                        action_key=candidate.action_key)
+                    candidate.state,candidate.task_id='accepted',task['id']
+            session.flush()
+            for message_id in messages:
+                mail=get_record(session,Email,message_id)
+                mail.state='review_needed' if session.scalar(select(Candidate.id).where(
+                    Candidate.message_id==message_id,Candidate.state=='open')) else 'parsed'
+                mail.version+=1
+                audit(session,mail,'mail.parsed',{'candidates':len(updates)})
+        return len(updates)
 
     def ingest(self, raw, *, account_id=None, uidvalidity=None, message_uid=None, internal_date=None, session=None):
         normalized = normalize_mail(raw)
@@ -353,8 +394,8 @@ class MailService:
             duplicate = record.classification.get("duplicate_candidate", False)
             fields = {column.name: getattr(record, column.name) for column in Email.__table__.columns}
             fields["text_excerpt"] = cache.content
-            timezone = self.settings.get(session)["timezone"]
-        classification, drafts = classify_and_parse(SimpleNamespace(**fields), timezone)
+            profile = self.settings.get(session)
+        classification, drafts = classify_and_parse(SimpleNamespace(**fields), profile['timezone'],profile['default_event_year'])
         with self.db.tx() as session:
             mail = get_record(session, Email, message_id)
             if mail.version != version or mail.state != "new" or mail.ignored_by_user:
@@ -393,16 +434,25 @@ class MailService:
                 session.delete(cache)
 
     def serialize(self, mail, session, detail=False):
+        candidates=list(session.scalars(select(Candidate).where(Candidate.message_id==mail.id)
+                                        .order_by(Candidate.created_at,Candidate.id)))
+        def temporal(candidate):
+            task=session.get(Task,candidate.task_id) if candidate.task_id else None
+            return task.temporal if task else candidate.candidate.get('temporal',{})
+        candidates.sort(key=lambda candidate:(*event_order(temporal(candidate)),candidate.created_at,candidate.id))
+        earliest=next((temporal(c) for c in candidates if c.state not in ('ignored','superseded')
+                       and event_order(temporal(c))[0]==0),{})
         data = {"id": mail.id, "version": mail.version, "subject": mail.subject, "from_addr": mail.from_addr,
                 "state": mail.state, "header_date": mail.header_date, "internal_date": mail.internal_date,
                 "first_seen_at": iso(mail.created_at), "ignored_by_user": mail.ignored_by_user,
-                "text_truncated": mail.text_truncated, "classification": mail.classification}
+                "text_truncated": mail.text_truncated, "classification": mail.classification,
+                'event_at':earliest.get('starts_at') or earliest.get('due_at'),
+                'event_date':earliest.get('local_date'),'event_timezone':earliest.get('timezone')}
         if detail:
             data.update(text_excerpt=mail.text_excerpt, text_hash=mail.text_hash, links=mail.links,
                         attachments=mail.attachments, candidates=[
                             {**c.candidate, "candidate_id": c.id, "state": c.state, "task_id": c.task_id}
-                            for c in session.scalars(select(Candidate).where(Candidate.message_id == mail.id)
-                                                     .order_by(Candidate.created_at, Candidate.id))])
+                            for c in candidates])
         return data
 
     def get(self, message_id):
@@ -416,7 +466,9 @@ class MailService:
                 query = query.where(Email.state == state)
             if account_id:
                 query = query.where(Email.id.in_(select(Occurrence.message_id).where(Occurrence.account_id == account_id)))
-            return [self.serialize(m, session) for m in session.scalars(query)]
+            values=[self.serialize(m, session) for m in session.scalars(query)]
+            return sorted(values,key=lambda mail:(*event_order({'starts_at':mail['event_at'],
+                'local_date':mail['event_date'],'timezone':mail['event_timezone']}),mail['first_seen_at'],mail['id']))
 
     def reviews(self):
         with self.db.read() as session:
@@ -500,10 +552,11 @@ class MailService:
                 mail.state = "new"
                 mail.version += 1
                 return {"message_id": mail.id}
-            if mail.classification.get("rule_version") == "rules-v2":
+            if mail.classification.get("rule_version") == "rules-v3":
                 return {"message_id": mail.id, "unchanged": True, "source_is_excerpt": True}
             # Rules are versioned. Existing accepted actions and user fields are immutable to reparse.
-            classification, drafts = classify_and_parse(mail, self.settings.get(session)["timezone"])
+            profile=self.settings.get(session)
+            classification, drafts = classify_and_parse(mail,profile['timezone'],profile['default_event_year'])
             mail.classification = classification
             existing = list(session.scalars(select(Candidate).where(Candidate.message_id == mail.id)))
             by_key = {c.action_key:c for c in existing}

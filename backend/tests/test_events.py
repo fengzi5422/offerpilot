@@ -54,11 +54,11 @@ def test_event_links_reject_active_and_local_schemes(client,url):
     assert client.post('/api/v1/tasks',json=body).status_code==422
 
 
-def test_yearless_date_retains_clock_in_each_candidate(client):
+def test_yearless_date_uses_configured_default_and_keeps_clock(client):
     mail=import_mail(client,eml('请于11月12日14:30参加面试。'))
     temporal=mail['candidates'][0]['temporal']
-    assert temporal['needs_confirmation']
-    assert temporal['candidates'][0]['starts_at']=='2026-11-12T06:30:00Z'
+    assert not temporal['needs_confirmation']
+    assert temporal['starts_at']=='2026-11-12T06:30:00Z'
 
 
 def services(tmp_path):
