@@ -1,7 +1,7 @@
 [Setup]
 AppId=OfferPilot.Lite
 AppName=OfferPilot Lite
-AppVersion=0.3.0
+AppVersion=0.4.0
 DefaultDirName={localappdata}\Programs\OfferPilot
 DefaultGroupName=OfferPilot
 PrivilegesRequired=lowest
